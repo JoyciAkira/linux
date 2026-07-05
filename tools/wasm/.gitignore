@@ -3,3 +3,4 @@
 /npm-package
 /vmlinux.wasm
 *.tgz
+artifacts/
