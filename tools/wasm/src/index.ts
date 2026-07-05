@@ -54,6 +54,7 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
   #memory: WebAssembly.Memory;
   #devices: VirtioDevice[];
   #initcpio?: ArrayBufferView;
+  #ncpus: number;
 
   memory: Uint8Array;
   devicetree: DeviceTreeNode;
@@ -74,6 +75,7 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
     this.#boot_console_writer = this.#boot_console.writable.getWriter();
     this.#devices = options.devices;
     this.#initcpio = options.initcpio;
+    this.#ncpus = options.cpus ?? navigator.hardwareConcurrency;
 
     const PAGE_SIZE = 0x10000;
     const BYTES_PER_MIB = 0x100000;
@@ -93,7 +95,7 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
       chosen: {
         "rng-seed": crypto.getRandomValues(new Uint8Array(64)),
         bootargs: `console=hvc0 ${options.cmdline ?? ""}`,
-        ncpus: options.cpus ?? navigator.hardwareConcurrency,
+        ncpus: this.#ncpus,
       },
       aliases: {},
       memory: {
@@ -250,6 +252,7 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
       virtio: virtio_imports({
         memory: this.#memory,
         devices: this.#devices,
+        ncpus: this.#ncpus,
         trigger_irq_for_cpu(cpu, irq) {
           instance.exports.trigger_irq_for_cpu(cpu, irq);
         },
