@@ -153,6 +153,10 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	set_personality(PER_LINUX_32BIT);
 	setup_new_exec(bprm);
 
+	/* NO-MMU: mm_alloc() zeros mm struct → end_brk = 0 blocks sbrk heap growth.
+	 * Lift ceiling to ULONG_MAX; actual backing is wasm memory.grow. */
+	current->mm->context.end_brk = -1;
+
 	set_binfmt(&wasm_format);
 
 	finalize_exec(bprm);
