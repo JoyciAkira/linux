@@ -728,6 +728,7 @@ export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
           }
           chain.release(n);
         }
+        this.trigger_interrupt("vring");
         break;
       default:
         console.error("ConsoleDevice: unknown vq", vq);
