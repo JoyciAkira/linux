@@ -76,3 +76,30 @@ Re-run the Node ENOMEM while dumping `s->memstat` (`committed` / `reserved` /
 
 Not executed here: it is new code (blink patch + rootfs regen), a separate
 milestone from this classification.
+
+## RESOLUTION (2026-07-05) — verdict B confirmed, fix landed
+
+The alignment-overhead half of the B pathology was fixed and **Node now loads to
+`EXIT=0`** under the 64KB-chunk path (previously ENOMEM at ~47.8MB).
+
+- **Root cause acted on:** the shim did `need = hdr + len + page` — one extra
+  64KB wasm page + an 8-byte raw-pointer header of pure alignment slack on
+  *every* mapping. On the `PAGE_MUG` path (~1584 mmaps for 99MB Node) this
+  doubled real backing (~128KB per 64KB chunk).
+- **Fix:** `blink-wasm-mman-impl.c` mmap now uses `aligned_alloc(page, len)`
+  (`len` already a page multiple; allocator guarantees alignment; pointer is
+  directly `free()`-able so `munmap` simplifies to `free(addr)`). Backing per
+  64KB chunk: ~128KB → 64KB (2×). Zero-init and mapped-region size unchanged.
+- **Verification:** two independent archwasm-harness runs, 64KB production chunk
+  size, both `EXIT=0` + `BN_DONE`, no `ENOMEM`, no `crisis` mmap. `EXIT=0` /
+  `BN_DONE` are the decisive ground-truth markers (the `[B2P-PROG]`/`[B2P-SHIM]`
+  stderr traces remain unobserved due to the char-by-char console-capture gap,
+  but are not needed now that Node completes).
+- **Open item 1 (which blink):** resolved — the rebuilt shim variant is the one
+  now deployed. blink fork commit `198f540` on `wasm-m114-node-loader`
+  (JoyciAkira/blink#1). New artifact sha256 `799a96b8bf239c94fd055eebc41412e5615892b9a99d1868c44ec58bfe9be0a4`;
+  regenerated `rootfs.ext2` sha256 `bc68f722005b631372444899d0d1a7b6c0eab57e6b83c8e62590e98a03ce58f9`.
+- **Residual (C — fragmentation) NOT yet addressed:** `__simple_malloc` is still
+  a non-coalescing bump allocator. The 2× cut was sufficient for the current
+  99MB Node workload, but a larger guest could still exhaust the heap. If that
+  recurs, open a separate `LAZY-COMMIT / dlmalloc` milestone (do not combine).

@@ -728,6 +728,7 @@ export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
           }
           chain.release(n);
         }
+        this.trigger_interrupt("vring");
         break;
       default:
         console.error("ConsoleDevice: unknown vq", vq);
@@ -768,10 +769,12 @@ export class EntropyDevice extends VirtioDevice<EmptyStruct> {
 export function virtio_imports({
   memory,
   devices,
+  ncpus,
   trigger_irq_for_cpu,
 }: {
   memory: WebAssembly.Memory;
   devices: VirtioDevice[];
+  ncpus: number;
   trigger_irq_for_cpu: (cpu: number, irq: number) => void;
 }): Imports["virtio"] {
   const dv = new DataView(memory.buffer);
@@ -816,7 +819,12 @@ export function virtio_imports({
       device.trigger_interrupt = (kind) => {
         U8.set(dv, is_config_addr, kind === "config" ? 1 : 0);
         U8.set(dv, is_vring_addr, kind === "vring" ? 1 : 0);
-        trigger_irq_for_cpu(0, irq); // TODO: balance?
+        // Broadcast the IRQ to every CPU: a blocking I/O can be awaited on any
+        // worker/CPU, not only CPU 0. Delivering only to CPU 0 lost the wakeup
+        // for tasks parked on other CPUs (e.g. blink reading /bin/node),
+        // deadlocking them. Spurious IRQs are harmless: the driver just finds
+        // the used ring empty and returns.
+        for (let cpu = 0; cpu < ncpus; cpu++) trigger_irq_for_cpu(cpu, irq);
       };
 
       device.setup_complete();
