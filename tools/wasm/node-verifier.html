@@ -1,0 +1,134 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>M114-NODE-VERIFIER — real /bin/node run</title></head>
+<body>
+<pre id="log"></pre>
+<script type="module">
+// C1 / M114-NODE-VERIFIER autotest. Boots the arch/wasm kernel, drives hush to
+// run the REAL /bin/node x86-64 under blink, and captures GATE-BACKED evidence:
+// the exit status comes from the shell's waitpid ($?), NOT a wrapper string
+// marker. BN_DONE-style markers are recorded only as SECONDARY corroboration.
+import { Machine, BlockDevice, ConsoleDevice } from "./dist/index.js";
+
+const logEl = document.getElementById("log");
+const out = [];
+function log(s) { out.push(s); logEl.textContent += s; }
+window.__consoleOutput = out;
+window.__done = false;
+window.__error = null;
+window.__result = null;
+
+function decodeChunk(chunk) {
+  const copy = new Uint8Array(chunk.byteLength);
+  copy.set(chunk);
+  return new TextDecoder().decode(copy);
+}
+function waitFor(marker, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    const tick = () => {
+      if (out.join("").includes(marker)) return resolve();
+      if (Date.now() - start > timeoutMs) return reject(new Error("timeout waiting for: " + marker));
+      setTimeout(tick, 100);
+    };
+    tick();
+  });
+}
+
+async function main() {
+  const rootfsResp = await fetch("./node-rootfs.ext2");
+  const rootfsBuf = new Uint8Array(await rootfsResp.arrayBuffer());
+  const storage = {
+    capacity: rootfsBuf.byteLength,
+    read(offset, length) { return rootfsBuf.subarray(offset, offset + length); },
+    write(offset, data) { rootfsBuf.set(data, offset); return data.byteLength; },
+  };
+
+  let stdinController;
+  const stdin = new ReadableStream({ start(c) { stdinController = c; } });
+  const stdout = new WritableStream({ write(chunk) { log(decodeChunk(chunk)); } });
+  const send = (s) => stdinController.enqueue(new TextEncoder().encode(s));
+
+  const machine = new Machine({
+    cmdline: "root=/dev/vda rootfstype=ext2 rw init=/bin/sh",
+    cpus: 4,
+    memoryMib: 1024,
+    devices: [ new BlockDevice(storage), new ConsoleDevice(stdin, stdout) ],
+  });
+
+  (async () => {
+    const reader = machine.bootConsole.getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      log(decodeChunk(value));
+    }
+  })();
+
+  machine.on("error", (e) => {
+    window.__error = String(e?.error ?? e);
+    log("\n[MACHINE ERROR] " + window.__error + "\n");
+  });
+
+  log("=== booting ===\n");
+  await machine.boot();
+  log("\n=== boot() returned ===\n");
+  await waitFor("hush - the humble shell", 60000);
+
+  // Run /bin/node and capture the REAL exit status via $? (shell waitpid),
+  // not a wrapper marker. The split-echo defeats terminal echo so the marker
+  // in OUTPUT means the command actually completed.
+  async function runCaptureExit(cmd, tag, timeoutMs = 180000) {
+    const m = tag + "_EXIT=";
+    const split = m.slice(0, 3) + '""' + m.slice(3);
+    send(`${cmd}; echo ${split}$?\n`);
+    await waitFor(m, timeoutMs);
+    const text = out.join("");
+    const re = new RegExp(tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "_EXIT=(\\d+)");
+    const found = text.match(re);
+    return found ? parseInt(found[1], 10) : null;
+  }
+
+  const versionExit = await runCaptureExit("/bin/blink -e /bin/node -- --version", "NODEVER");
+  const evalExit = await runCaptureExit(
+    `/bin/blink -e /bin/node -- -e "process.stdout.write('NODE_EVAL_OK')"`, "NODEEVAL");
+
+  const text = out.join("");
+  const mmapEnomem = (text.match(/mmap[^\n]*ENOMEM/gi) || []).length +
+                     (text.match(/errno\s*12/gi) || []).length;
+  const mmapCalls = (text.match(/\bmmap\(/g) || []).length;
+
+  const result = {
+    booted: text.includes("=== boot() returned ==="),
+    rootMounted: text.includes("Mounted root (ext2 filesystem)"),
+    shell: text.includes("hush - the humble shell"),
+    // PRIMARY gate-backed evidence: exit status from shell waitpid ($?).
+    nodeVersionExit: versionExit,
+    nodeEvalExit: evalExit,
+    nodeVersionPrinted: /v\d+\.\d+\.\d+/.test(text),
+    nodeEvalOutputSeen: text.includes("NODE_EVAL_OK"),
+    // Memory evidence.
+    mmapEnomem,
+    mmapCalls,
+    machineError: window.__error,
+  };
+  // PASS only if exit came from $? and equals 0, with no ENOMEM. The string
+  // markers (NODE_EVAL_OK) are corroboration, not the gate.
+  result.pass = result.booted && result.rootMounted && result.shell &&
+    result.nodeVersionExit === 0 && result.nodeEvalExit === 0 &&
+    result.mmapEnomem === 0;
+
+  window.__result = result;
+  window.__done = true;
+  log("\n=== NODE_VERIFIER_COMPLETE " + JSON.stringify(result) + " ===\n");
+}
+
+main().catch((e) => {
+  window.__error = String(e?.stack ?? e);
+  window.__result = { pass: false, error: window.__error };
+  window.__done = true;
+  log("\n[FATAL] " + window.__error + "\n");
+});
+</script>
+</body>
+</html>
