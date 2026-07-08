@@ -2,6 +2,7 @@
 #include <asm/globals.h>
 #include <asm/sysmem.h>
 #include <asm/wasm_imports.h>
+#include <asm/process_events.h>
 #include <linux/entry-common.h>
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
@@ -157,6 +158,26 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	bootstrap_args->task = p;
 
 	name_len = snprintf(name, ARRAY_SIZE(name), "%s (%d)", p->comm, p->pid);
+
+	/* SR0.10: Emit CLONE_WORKER_REQUESTED before spawning worker */
+	{
+		u64 run_id_hi, run_id_lo;
+		zn_get_run_id(&run_id_hi, &run_id_lo);
+		wasm_kernel_process_event(
+			ZN_EVENT_CLONE_WORKER_REQUESTED,
+			run_id_hi,
+			run_id_lo,
+			zn_get_next_event_seq(),
+			p->pid,           /* child pid */
+			p->tgid,          /* child tgid */
+			current->pid,     /* parent pid */
+			0,                /* worker_id: unused */
+			args->flags,      /* data0: clone_flags */
+			0,                /* data1: reserved */
+			p->comm,
+			strnlen(p->comm, sizeof(p->comm))
+		);
+	}
 
 	wasm_kernel_spawn_worker(&task_entry, bootstrap_args, name, name_len,
 				 args->fn == wasm_call_clone_fn);

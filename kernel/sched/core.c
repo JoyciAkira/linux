@@ -76,6 +76,9 @@
 #include <asm/irq_regs.h>
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
+#ifdef CONFIG_WASM
+#include <asm/process_events.h>
+#endif
 
 #define CREATE_TRACE_POINTS
 #include <linux/sched/rseq_api.h>
@@ -6580,6 +6583,26 @@ void __noreturn do_task_dead(void)
 
 #ifdef CONFIG_WASM
 	wasm_set_thread_done(true);
+
+	/* SR0.10: Emit TASK_DEAD after marking thread done */
+	{
+		u64 run_id_hi, run_id_lo;
+		zn_get_run_id(&run_id_hi, &run_id_lo);
+		wasm_kernel_process_event(
+			ZN_EVENT_TASK_DEAD,
+			run_id_hi,
+			run_id_lo,
+			zn_get_next_event_seq(),
+			current->pid,
+			current->tgid,
+			current->parent->pid,
+			0,                    /* worker_id: unused */
+			current->exit_code,   /* data0: exit_code (status + signal) */
+			0,                    /* data1: reserved */
+			current->comm,
+			strnlen(current->comm, sizeof(current->comm))
+		);
+	}
 #endif
 	__schedule(SM_NONE);
 	BUG();
