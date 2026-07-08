@@ -6,6 +6,7 @@
 #include <linux/personality.h>
 #include <linux/ptrace.h>
 #include <linux/syscalls.h>
+#include <asm/process_events.h>
 
 static int load_wasm_binary(struct linux_binprm *bprm);
 
@@ -160,6 +161,26 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 	set_binfmt(&wasm_format);
 
 	finalize_exec(bprm);
+
+	/* SR0.10: Emit WASM_EXEC_COMMITTED event after exec finalized */
+	{
+		u64 run_id_hi, run_id_lo;
+		zn_get_run_id(&run_id_hi, &run_id_lo);
+		wasm_kernel_process_event(
+			ZN_EVENT_WASM_EXEC_COMMITTED,
+			run_id_hi,
+			run_id_lo,
+			zn_get_next_event_seq(),
+			current->pid,
+			current->tgid,
+			current->parent->pid,
+			0, /* worker_id: unused for exec event */
+			0, /* data0: reserved */
+			0, /* data1: reserved */
+			current->comm,
+			strnlen(current->comm, sizeof(current->comm))
+		);
+	}
 
 	wasm_user_instantiate(true);
 
