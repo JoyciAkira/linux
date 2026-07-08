@@ -9,6 +9,7 @@ obj-y += \
 	idle.o \
 	irq.o \
 	process.o \
+	process_events.o \
 	ptrace.o \
 	sections.o \
 	setup.o \

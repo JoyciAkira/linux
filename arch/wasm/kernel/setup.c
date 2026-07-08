@@ -2,6 +2,7 @@
 #include <asm/sections.h>
 #include <asm/setup.h>
 #include <asm/sysmem.h>
+#include <asm/process_events.h>
 #include <linux/libfdt.h>
 #include <linux/memblock.h>
 #include <linux/of.h>
@@ -88,6 +89,9 @@ void __init setup_arch(char **cmdline_p)
 	memblock_dump_all();
 
 	zones_init();
+
+	/* SR0.10: Initialize process telemetry run identity */
+	zn_init_run_identity();
 }
 
 void machine_restart(char *cmd)
