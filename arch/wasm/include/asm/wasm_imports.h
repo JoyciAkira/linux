@@ -27,6 +27,11 @@ void wasm_import(kernel, spawn_worker)(void (*fn)(void *), void *arg,
 
 void wasm_import(kernel, run_on_main)(void (*fn)(void *), void *arg);
 
+void wasm_import(kernel, process_event)(u32 event_kind, u64 run_id_hi, u64 run_id_lo,
+					u64 event_seq, u32 pid, u32 tgid, u32 ppid,
+					u32 worker_id, u64 data0, u64 data1,
+					const char *comm, size_t comm_len);
+
 int wasm_import(user, compile)(u8 *bytes, u32 len);
 void wasm_import(user, instantiate)(bool fresh_memory);
 void wasm_import(user, call)(void);
