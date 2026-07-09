@@ -40,6 +40,20 @@ export interface Imports {
       share_user_memory: number,
     ): void;
     run_on_main(fn: number, arg: number): void;
+    process_event(
+      event_kind: number,
+      run_id_hi: bigint,
+      run_id_lo: bigint,
+      event_seq: bigint,
+      pid: number,
+      tgid: number,
+      ppid: number,
+      worker_id: number,
+      data0: bigint,
+      data1: bigint,
+      comm: number,
+      comm_len: number,
+    ): void;
   };
   user: {
     compile(buf: number, size: number): number;
@@ -87,6 +101,7 @@ export function kernel_imports(
     run_on_main,
     get_user_module,
     get_user_memory,
+    process_event_handler,
   }: {
     is_worker: boolean;
     memory: WebAssembly.Memory;
@@ -102,6 +117,19 @@ export function kernel_imports(
     run_on_main: (fn: number, arg: number) => void;
     get_user_module: () => WebAssembly.Module | null;
     get_user_memory: () => WebAssembly.Memory | null;
+    process_event_handler?: (
+      event_kind: number,
+      run_id_hi: bigint,
+      run_id_lo: bigint,
+      event_seq: bigint,
+      pid: number,
+      tgid: number,
+      ppid: number,
+      worker_id: number,
+      data0: bigint,
+      data1: bigint,
+      comm: string,
+    ) => void;
   },
 ): Imports["kernel"] {
   const mem = new Uint8Array(memory.buffer);
@@ -168,5 +196,39 @@ export function kernel_imports(
     },
 
     run_on_main,
+
+    process_event: (
+      event_kind,
+      run_id_hi,
+      run_id_lo,
+      event_seq,
+      pid,
+      tgid,
+      ppid,
+      worker_id,
+      data0,
+      data1,
+      comm,
+      comm_len,
+    ) => {
+      if (process_event_handler) {
+        const comm_str = new TextDecoder().decode(
+          mem.slice(comm, comm + comm_len),
+        );
+        process_event_handler(
+          event_kind,
+          run_id_hi,
+          run_id_lo,
+          event_seq,
+          pid,
+          tgid,
+          ppid,
+          worker_id,
+          data0,
+          data1,
+          comm_str,
+        );
+      }
+    },
   };
 }

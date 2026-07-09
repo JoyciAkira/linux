@@ -55,6 +55,19 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
   #devices: VirtioDevice[];
   #initcpio?: ArrayBufferView;
   #ncpus: number;
+  #process_event_handler?: (
+    event_kind: number,
+    run_id_hi: bigint,
+    run_id_lo: bigint,
+    event_seq: bigint,
+    pid: number,
+    tgid: number,
+    ppid: number,
+    worker_id: number,
+    data0: bigint,
+    data1: bigint,
+    comm: string,
+  ) => void;
 
   memory: Uint8Array;
   devicetree: DeviceTreeNode;
@@ -69,6 +82,19 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
     cpus?: number;
     devices: VirtioDevice[];
     initcpio?: ArrayBufferView;
+    processEventHandler?: (
+      event_kind: number,
+      run_id_hi: bigint,
+      run_id_lo: bigint,
+      event_seq: bigint,
+      pid: number,
+      tgid: number,
+      ppid: number,
+      worker_id: number,
+      data0: bigint,
+      data1: bigint,
+      comm: string,
+    ) => void;
   }) {
     super();
     this.#boot_console = new TransformStream<Uint8Array, Uint8Array>();
@@ -76,6 +102,7 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
     this.#devices = options.devices;
     this.#initcpio = options.initcpio;
     this.#ncpus = options.cpus ?? navigator.hardwareConcurrency;
+    this.#process_event_handler = options.processEventHandler;
 
     const PAGE_SIZE = 0x10000;
     const BYTES_PER_MIB = 0x100000;
@@ -238,6 +265,7 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
         run_on_main: unavailable,
         get_user_module: unavailable,
         get_user_memory: unavailable,
+        process_event_handler: this.#process_event_handler,
       }),
       user: {
         compile: unavailable,
