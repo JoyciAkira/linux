@@ -1,0 +1,103 @@
+{
+  "task": "D1 Instrumentation Build Repair (pre-P0-rerun)",
+  "timestamp": "2026-07-11T18:55:00-06:00",
+  "verdict": "D1_INSTRUMENTATION_BUILD_REPAIR_COMPLETE",
+  "preservedFailedRunIdentity": {
+    "workerSourceSha": "08bceae5b989770b83c9b2497fac1cf973773d25fcc2261ec35248330167ab43",
+    "deployedBundleSha": "300d3d22989625fc8732d7455a3264d2e94ff8948f194bb1781b7d30b4263d95",
+    "failedBuildGeneratedBundleSha": "00045d33e402bc0a0a382327fc722aa2729b2198b508570f71668320f3c66773",
+    "failedBuildArtifactClassification": "INVALID_BUILD_OUTPUT_NOT_DEPLOYABLE",
+    "failedBuildArtifactQuarantine": "/tmp/d1-p0-invalid-build-output/dist-failed-build",
+    "failedBuildArtifactRemovedFromBuildTree": true,
+    "p0ReportPreservedUnchanged": "docs/full-runtime-ralph/d1-p0-worker-rebuild-parity-report.json"
+  },
+  "phase2_syscallDecoderRepair": {
+    "file": "src/d1-syscall-decoder.ts",
+    "authoritativeAbi": {
+      "targetArchitecture": "x86-64 (amd64)",
+      "sourceOfSyscallNumbering": "this kernel tree: arch/x86/entry/syscalls/syscall_64.tbl (abi 'common')",
+      "runtimeJustification": "Active runtime is Node v20.18.0 as an x86-64 ELF executed under Blink (x86-64 emulator to wasm32). x86-64 Linux syscall numbering is authoritative. Consistent with AW3 evidence and the D1 decoder's own declared scope.",
+      "clock_nanosleep": "230 = 0xe6",
+      "epoll_wait": "232 = 0xe8"
+    },
+    "rootCause": "Duplicate object-literal key 0xe8 assigned to both clock_nanosleep (wrong) and epoll_wait (correct). clock_nanosleep is 0xe6; the decoder had written it as 0xe8, colliding with epoll_wait's authoritative 0xe8.",
+    "correctionsApplied": [
+      { "name": "clock_nanosleep", "was": "0xe8", "now": "0xe6", "authoritativeDec": 230 },
+      { "name": "eventfd", "was": "0x11d (fallocate)", "now": "0x11c", "authoritativeDec": 284 },
+      { "name": "eventfd2", "was": "0x120 (accept4)", "now": "0x122", "authoritativeDec": 290 },
+      { "name": "ioctl", "was": "0x49 (flock)", "now": "0x10", "authoritativeDec": 16 }
+    ],
+    "additionalCorrectionsRationale": "Audit of the full decoder against syscall_64.tbl surfaced three further wrong numbers (eventfd, eventfd2, ioctl) beyond the compiler-reported duplicate. Leaving known-wrong mappings would ship a decoder that mis-decodes real syscalls, violating 'do not weaken decoding'. All numbers verified against the authoritative table.",
+    "structuralHardening": "Table restructured from a raw object literal to a ReadonlyArray of [number, name] tuples built into a Map via buildSyscallMap(), which THROWS on any duplicate numeric key. Duplicate keys are now a hard init/test failure instead of a silent TS overwrite.",
+    "decodeSyscallApiStable": true,
+    "isKnownSyscallAdded": true
+  },
+  "phase3_messageUnionRepair": {
+    "file": "src/index.ts",
+    "rootCause": "TS2345 at index.ts:224 unreachable(event.data). The d1_trace_export variant existed in the WorkerMessage union (defined in worker.ts:19-31) and was produced by worker.ts exportD1Trace(), but the main-thread dispatcher switch had no case for it, so event.data narrowed to the d1_trace_export type (not never) at unreachable().",
+    "workerTsModified": false,
+    "workerTsModifiedNote": "The union member d1_trace_export ALREADY existed in worker.ts (source 08bceae5). No modification to worker.ts was required or made. The correction is entirely consumer-side in index.ts.",
+    "correctionApplied": [
+      "Added exported interface D1TraceExport with explicit stats schema {total,captured,dropped}.",
+      "Added exported decodeD1TraceExport() validator: fail-closed (returns null) for malformed payloads, never throws.",
+      "Added Machine event map member d1_trace: D1TraceExport.",
+      "Added switch case 'd1_trace_export': decodes payload and emits 'd1_trace' when valid; drops silently when malformed.",
+      "Left unreachable(event.data) intact in default so unknown message TYPES still fail closed and the exhaustive switch compiles without casts."
+    ],
+    "forbiddenRepairsUsed": {
+      "as_any": false,
+      "as_never": false,
+      "ts_ignore": false,
+      "ts_expect_error": false,
+      "removed_unreachable": false,
+      "silent_default_branch_for_unknown": false
+    }
+  },
+  "phase4_scopedChecksAndCanonicalBuild": {
+    "gitDiffCheckExit": 0,
+    "tscNoEmitExit": 0,
+    "compilerVersion": "5.8.3",
+    "canonicalCommand": "tsc",
+    "canonicalCommandProvenance": "Makefile TSC rule: 'dist/index.js dist/index.d.ts &: $(shell find src -type f)' runs $(TSC); reads tsconfig.json (include src/**/*.ts). Same command proven by AW3 and used in the failed P0 run.",
+    "canonicalBuildWorkingDirectory": "/Users/danielecorrao/tombl-build/linux/tools/wasm",
+    "canonicalBuildExit": 0,
+    "canonicalBuildStdout": "",
+    "canonicalBuildStderr": "",
+    "sourceShaAfter": "08bceae5b989770b83c9b2497fac1cf973773d25fcc2261ec35248330167ab43",
+    "generatedWorkerBundleSha": "00045d33e402bc0a0a382327fc722aa2729b2198b508570f71668320f3c66773",
+    "buildLogHash_stdout_empty": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "criticalProvenanceNote": "The successfully-built worker.js SHA (00045d33) equals the previously QUARANTINED failed-build worker.js SHA. This is expected and correct: worker.ts source (08bceae5) was already valid; the earlier build failed ONLY on sibling type errors (d1-syscall-decoder.ts, index.ts) and TS still emitted worker.js from valid worker.ts. Now the whole build succeeds, so 00045d33 is the product of an EXIT-0 canonical build. Identical bytes, fundamentally different provenance (failed vs green). The quarantined copy remains excluded from every deploy/serve path."
+  },
+  "phase2phase3_tests": {
+    "runner": "node --test (node v22.23.1, node:test)",
+    "location": "tests/ (outside src/ to keep canonical build glob clean)",
+    "targetsCompiledDist": true,
+    "result": "11 pass / 0 fail (exit 0)",
+    "decoderTests": [
+      "all numeric syscall keys are unique",
+      "buildSyscallMap throws on duplicate numeric keys",
+      "clock_nanosleep decodes correctly (0xe6/230)",
+      "epoll_wait decodes correctly (0xe8/232)",
+      "clock_nanosleep and epoll_wait are distinct numbers",
+      "corrected entries match authoritative x86-64 numbering (eventfd/eventfd2/ioctl)",
+      "unknown syscall numbers remain typed as unknown"
+    ],
+    "messageUnionTests": [
+      "valid d1_trace_export message is accepted and decoded correctly",
+      "malformed payload is rejected (fail closed) — bad stats",
+      "malformed payload is rejected (fail closed) — bad events",
+      "d1_trace event delivers the decoded trace to subscribers"
+    ]
+  },
+  "phase5_commitScope": {
+    "workerTsShaGate": "08bceae5... PASS (unchanged, excluded from commit)",
+    "workerTsExcludedReason": "worker.ts already carried the d1_trace_export union (no repair needed there) AND its pre-existing diff bundles unrelated memory-config changes (768MiB/2GiB) baked into the frozen P0 baseline. Committing it would violate 'do not include unrelated worker changes' and perturb the frozen 08bceae5 baseline.",
+    "committedFiles": [
+      "src/d1-syscall-decoder.ts (decoder correction)",
+      "src/index.ts (message-union consumer correction)",
+      "tests/d1-syscall-decoder.test.mjs",
+      "tests/d1-trace-export-message.test.mjs",
+      "docs/full-runtime-ralph/d1-instrumentation-build-repair-evidence.json"
+    ]
+  }
+}

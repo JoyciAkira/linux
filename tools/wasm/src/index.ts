@@ -47,7 +47,39 @@ const resources = (async () => {
 
 const INITCPIO_ADDR = 0x200000;
 
-export class Machine extends EventEmitter<{ error: ErrorEvent }> {
+export interface D1TraceExport {
+  events: unknown[];
+  stats: {
+    total: number;
+    captured: number;
+    dropped: number;
+  };
+}
+
+export function decodeD1TraceExport(
+  data: { events: unknown[]; stats: unknown },
+): D1TraceExport | null {
+  if (!Array.isArray(data.events)) return null;
+  const stats = data.stats;
+  if (typeof stats !== "object" || stats === null) return null;
+  const s = stats as Record<string, unknown>;
+  if (
+    typeof s.total !== "number" ||
+    typeof s.captured !== "number" ||
+    typeof s.dropped !== "number"
+  ) {
+    return null;
+  }
+  return {
+    events: data.events,
+    stats: { total: s.total, captured: s.captured, dropped: s.dropped },
+  };
+}
+
+export class Machine extends EventEmitter<{
+  error: ErrorEvent;
+  d1_trace: D1TraceExport;
+}> {
   #boot_console: TransformStream<Uint8Array, Uint8Array>;
   #boot_console_writer: WritableStreamDefaultWriter<Uint8Array>;
   #workers: Worker[] = [];
@@ -220,6 +252,11 @@ export class Machine extends EventEmitter<{ error: ErrorEvent }> {
             instance.exports.__indirect_function_table
               .get(event.data.fn)!(event.data.arg);
             break;
+          case "d1_trace_export": {
+            const decoded = decodeD1TraceExport(event.data);
+            if (decoded !== null) this.emit("d1_trace", decoded);
+            break;
+          }
           default:
             unreachable(event.data);
         }
