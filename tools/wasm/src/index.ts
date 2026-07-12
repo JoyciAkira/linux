@@ -47,32 +47,74 @@ const resources = (async () => {
 
 const INITCPIO_ADDR = 0x200000;
 
+export interface D1TraceMetadata {
+  capacity: number;
+  storedRecordCount: number;
+  totalRecordCount: number;
+  overwriteCount: number;
+  firstStoredSequence: number | null;
+  lastStoredSequence: number | null;
+  wrapped: boolean;
+}
+
 export interface D1TraceExport {
-  events: unknown[];
-  stats: {
-    total: number;
-    captured: number;
-    dropped: number;
-  };
+  runId: string;
+  records: Array<Record<string, unknown>>;
+  metadata: D1TraceMetadata;
+}
+
+function isD1Record(r: unknown): r is Record<string, unknown> {
+  if (typeof r !== "object" || r === null) return false;
+  const o = r as Record<string, unknown>;
+  if (typeof o.sequence !== "number") return false;
+  if (typeof o.eventType !== "string") return false;
+  if (o.eventType === "syscall_enter") {
+    if (typeof o.rawSyscallNumber !== "number") return false;
+    if (!Array.isArray(o.rawArguments)) return false;
+    if ((o.rawArguments as unknown[]).length > 6) return false;
+    if ((o.rawArguments as unknown[]).some((a) => typeof a !== "number")) return false;
+  }
+  if (o.eventType === "syscall_return" && typeof o.rawReturnValue !== "number") {
+    return false;
+  }
+  return true;
+}
+
+function isD1Metadata(m: unknown): m is D1TraceMetadata {
+  if (typeof m !== "object" || m === null) return false;
+  const o = m as Record<string, unknown>;
+  if (
+    typeof o.capacity !== "number" ||
+    typeof o.storedRecordCount !== "number" ||
+    typeof o.totalRecordCount !== "number" ||
+    typeof o.overwriteCount !== "number" ||
+    typeof o.wrapped !== "boolean"
+  ) {
+    return false;
+  }
+  if (o.capacity > 4096) return false;
+  if (o.storedRecordCount > o.capacity) return false;
+  if (o.wrapped !== (o.overwriteCount > 0)) return false;
+  return true;
 }
 
 export function decodeD1TraceExport(
-  data: { events: unknown[]; stats: unknown },
+  data: { runId?: unknown; records?: unknown; metadata?: unknown },
 ): D1TraceExport | null {
-  if (!Array.isArray(data.events)) return null;
-  const stats = data.stats;
-  if (typeof stats !== "object" || stats === null) return null;
-  const s = stats as Record<string, unknown>;
-  if (
-    typeof s.total !== "number" ||
-    typeof s.captured !== "number" ||
-    typeof s.dropped !== "number"
-  ) {
-    return null;
+  if (typeof data.runId !== "string") return null;
+  if (!Array.isArray(data.records)) return null;
+  if (!isD1Metadata(data.metadata)) return null;
+  if (data.records.length !== data.metadata.storedRecordCount) return null;
+  if (!data.records.every(isD1Record)) return null;
+  for (let i = 1; i < data.records.length; i++) {
+    const prev = data.records[i - 1] as Record<string, unknown>;
+    const cur = data.records[i] as Record<string, unknown>;
+    if ((cur.sequence as number) <= (prev.sequence as number)) return null;
   }
   return {
-    events: data.events,
-    stats: { total: s.total, captured: s.captured, dropped: s.dropped },
+    runId: data.runId,
+    records: data.records as Array<Record<string, unknown>>,
+    metadata: data.metadata,
   };
 }
 
@@ -87,6 +129,8 @@ export class Machine extends EventEmitter<{
   #devices: VirtioDevice[];
   #initcpio?: ArrayBufferView;
   #ncpus: number;
+  #d1_trace_enabled: boolean = false;
+  #d1_run_id: string = "d1-run";
   #process_event_handler?: (
     event_kind: number,
     run_id_hi: bigint,
@@ -114,6 +158,8 @@ export class Machine extends EventEmitter<{
     cpus?: number;
     devices: VirtioDevice[];
     initcpio?: ArrayBufferView;
+    d1TraceEnabled?: boolean;
+    d1RunId?: string;
     processEventHandler?: (
       event_kind: number,
       run_id_hi: bigint,
@@ -135,6 +181,8 @@ export class Machine extends EventEmitter<{
     this.#initcpio = options.initcpio;
     this.#ncpus = options.cpus ?? navigator.hardwareConcurrency;
     this.#process_event_handler = options.processEventHandler;
+    this.#d1_trace_enabled = options.d1TraceEnabled === true;
+    this.#d1_run_id = options.d1RunId ?? "d1-run";
 
     const PAGE_SIZE = 0x10000;
     const BYTES_PER_MIB = 0x100000;
@@ -272,6 +320,8 @@ export class Machine extends EventEmitter<{
           memory: this.#memory,
           parent_user_module: user_module,
           parent_user_memory: user_memory,
+          d1TraceEnabled: this.#d1_trace_enabled,
+          d1RunId: this.#d1_run_id,
         } satisfies InitMessage,
       );
     };

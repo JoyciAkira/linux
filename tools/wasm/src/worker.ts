@@ -5,6 +5,8 @@ import {
   type Instance,
   kernel_imports,
 } from "./wasm.ts";
+import { D1RingBuffer, type D1Record, type D1RingMetadata } from "./d1-ring-buffer.ts";
+import { wrapSyscall } from "./d1-syscall-wrapper.ts";
 
 export interface InitMessage {
   fn: number;
@@ -13,6 +15,8 @@ export interface InitMessage {
   memory: WebAssembly.Memory;
   parent_user_module: WebAssembly.Module | null;
   parent_user_memory: WebAssembly.Memory | null;
+  d1TraceEnabled?: boolean;
+  d1RunId?: string;
 }
 export type WorkerMessage =
   | {
@@ -25,13 +29,37 @@ export type WorkerMessage =
   }
   | { type: "boot_console_write"; message: ArrayBuffer }
   | { type: "boot_console_close" }
-  | { type: "run_on_main"; fn: number; arg: number };
+  | { type: "run_on_main"; fn: number; arg: number }
+  | {
+    type: "d1_trace_export";
+    runId: string;
+    records: D1Record[];
+    metadata: D1RingMetadata;
+  };
 
 const unavailable = () => {
   throw new Error("not available on worker thread");
 };
 
 const postMessage = self.postMessage as (message: WorkerMessage) => void;
+
+const d1TraceBuffer = new D1RingBuffer(4096);
+let d1TraceEnabled = false;
+let d1RunId = "";
+let d1Exported = false;
+
+export function exportD1Trace(): void {
+  if (!d1TraceEnabled || d1Exported) return;
+  d1Exported = true;
+  d1TraceBuffer.recordLifecycle("trace_export_requested", d1RunId);
+  if (d1TraceBuffer.getMetadata().wrapped) {
+    d1TraceBuffer.recordLifecycle("trace_overwrite_observed", d1RunId);
+  }
+  d1TraceBuffer.recordLifecycle("trace_export_completed", d1RunId);
+  const records = d1TraceBuffer.getRecords();
+  const metadata = d1TraceBuffer.getMetadata();
+  postMessage({ type: "d1_trace_export", runId: d1RunId, records, metadata });
+}
 
 function user_imports({
   kernel_memory,
@@ -88,54 +116,72 @@ function user_imports({
         assert(module);
 
         if (fresh_memory || !memory) {
-          const size = 2048 + Math.floor(Math.random() * 1000);
+          // memory.grow su shared memory importata fallisce a runtime; quindi la
+          // memory deve nascere gia' abbastanza grande per processi come Node/blink
+          // (99MB file + heap V8). initial alto, non affidarsi a grow.
+          const initial = 12288; // 768 MiB iniziali
+          const maximum = 32768; // 2 GiB tetto
 
-          // TODO: read the real initial size from the module.
-          // TOOD: enforce rlimit via maximum.
           memory = new WebAssembly.Memory({
-            initial: size,
-            maximum: size,
+            initial,
+            maximum,
             shared: true,
           });
+          if (d1TraceEnabled) {
+            d1TraceBuffer.recordLifecycle("wasm_memory_constructed", d1RunId, {
+              detail: `initial=${initial} maximum=${maximum}`,
+            });
+          }
         }
 
         const kernel_instance = get_kernel_instance();
 
         // console.log("instantiating with", memory);
         try {
+          // D1: Define original syscall handler (before wrapping)
+          const originalSyscallHandler = (
+            nr: number,
+            arg0: number,
+            arg1: number,
+            arg2: number,
+            arg3: number,
+            arg4: number,
+            arg5: number,
+          ): number => {
+            const original_instance = instance;
+            const ret = kernel_instance.exports.syscall(
+              nr,
+              arg0,
+              arg1,
+              arg2,
+              arg3,
+              arg4,
+              arg5,
+            );
+            if (instance !== original_instance) {
+              // if the instance changed, then this was the exec syscall,
+              // so call into the new instance:
+              call_entry = call_start;
+
+              // and we never want to return to the caller of the syscall, so
+              // skip straight to the catch block of the parent's call_entry
+              throw HALT_USER;
+            }
+            return ret;
+          };
+
+          const wrappedSyscallHandler = wrapSyscall(originalSyscallHandler, {
+            buffer: d1TraceBuffer,
+            runId: d1RunId,
+            enabled: d1TraceEnabled,
+            processId: `worker-${self.name || "unknown"}`,
+            getThreadId: () => 0,
+          });
+
           instance = new WebAssembly.Instance(module, {
             env: { memory },
             linux: {
-              syscall: (
-                nr: number,
-                arg0: number,
-                arg1: number,
-                arg2: number,
-                arg3: number,
-                arg4: number,
-                arg5: number,
-              ) => {
-                const original_instance = instance;
-                const ret = kernel_instance.exports.syscall(
-                  nr,
-                  arg0,
-                  arg1,
-                  arg2,
-                  arg3,
-                  arg4,
-                  arg5,
-                );
-                if (instance !== original_instance) {
-                  // if the instance changed, then this was the exec syscall,
-                  // so call into the new instance:
-                  call_entry = call_start;
-
-                  // and we never want to return to the caller of the syscall, so
-                  // skip straight to the catch block of the parent's call_entry
-                  throw HALT_USER;
-                }
-                return ret;
-              },
+              syscall: wrappedSyscallHandler,
               get_thread_area: kernel_instance.exports.get_thread_area,
               get_args_length: kernel_instance.exports.get_args_length,
               get_args: kernel_instance.exports.get_args,
@@ -146,18 +192,39 @@ function user_imports({
             assert(instance.exports.memory instanceof WebAssembly.Memory);
             memory = instance.exports.memory;
           }
+          if (d1TraceEnabled) {
+            d1TraceBuffer.recordLifecycle("kernel_module_instantiated", d1RunId);
+          }
         } catch (error) {
           console.log("error instantiating user module:", String(error));
         }
       },
       call() {
+        if (d1TraceEnabled) {
+          d1TraceBuffer.recordLifecycle("kernel_start_called", d1RunId);
+        }
         for (;;) {
           try {
             call_entry();
           } catch (error) {
-            if (error === HALT_USER) continue;
+            if (error === HALT_USER) {
+              if (d1TraceEnabled) {
+                d1TraceBuffer.recordLifecycle("halt_user_observed", d1RunId);
+              }
+              continue;
+            }
             if (error === HALT_KERNEL) throw error;
-            console.log("error running user module:", String(error));
+            console.log("error running user module:", String(error), (error && (error as Error).stack) || "");
+            if (d1TraceEnabled) {
+              d1TraceBuffer.recordRuntimeError(error, d1RunId, {
+                eventType: "runtime_error_caught",
+                activeOperation: "call_entry",
+              });
+              d1TraceBuffer.recordLifecycle("kernel_start_returned", d1RunId, {
+                detail: (error as Error)?.name ?? "error",
+              });
+              exportD1Trace();
+            }
             return;
           }
         }
@@ -167,6 +234,7 @@ function user_imports({
         // and therefore we our entrypoint is a user-specified function.
         // Our custom variant of the clone syscall spawns a worker that calls
         // switch_entry, then immediately calls instantiate.
+        console.log("[CLONE] switch_entry fn=" + fn + " arg=" + arg + " parent_module=" + !!parent_module + " parent_memory=" + !!parent_memory);
 
         assert(parent_module);
         assert(parent_memory);
@@ -184,12 +252,15 @@ function user_imports({
           );
 
           const f = __indirect_function_table.get(fn);
+          console.log("[CLONE] resolved fn=" + fn + " -> " + typeof f + " len=" + (f && f.length));
           assert(
             typeof f === "function" && f.length === 1,
             "Invalid function signature",
           );
 
+          console.log("[CLONE] calling f(" + arg + ")");
           f(arg);
+          console.log("[CLONE] f returned");
 
           // throw new Error("thread entrypoint reached the end without exiting");
           console.warn("thread entrypoint reached the end without exiting");
@@ -241,6 +312,13 @@ function user_imports({
 self.onmessage = (event: MessageEvent<InitMessage>) => {
   const { fn, arg, vmlinux, memory, parent_user_module, parent_user_memory } =
     event.data;
+
+  if (event.data.d1TraceEnabled === true) {
+    d1TraceEnabled = true;
+    d1RunId = event.data.d1RunId ?? "d1-run";
+    d1TraceBuffer.recordLifecycle("trace_initialized", d1RunId);
+    d1TraceBuffer.recordLifecycle("worker_start_message_received", d1RunId);
+  }
 
   const user = user_imports({
     kernel_memory: memory,
@@ -302,3 +380,25 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
     throw error;
   }
 };
+
+self.addEventListener("error", (event: ErrorEvent) => {
+  if (d1TraceEnabled) {
+    d1TraceBuffer.recordRuntimeError(event.error ?? event.message, d1RunId, {
+      eventType: "worker_error_event",
+      activeOperation: "self.onerror",
+    });
+  }
+});
+self.addEventListener("messageerror", () => {
+  if (d1TraceEnabled) {
+    d1TraceBuffer.recordLifecycle("worker_messageerror_event", d1RunId);
+  }
+});
+self.addEventListener("unhandledrejection", (event: PromiseRejectionEvent) => {
+  if (d1TraceEnabled) {
+    d1TraceBuffer.recordRuntimeError(event.reason, d1RunId, {
+      eventType: "worker_unhandledrejection",
+      activeOperation: "unhandledrejection",
+    });
+  }
+});
