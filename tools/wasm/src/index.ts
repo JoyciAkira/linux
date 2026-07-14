@@ -9,6 +9,9 @@ export {
   type BlockDeviceStorage,
   ConsoleDevice,
   EntropyDevice,
+  LoopbackNetworkBridge,
+  type NetworkBridge,
+  NetworkDevice,
   type VsockConnection,
   VsockDevice,
 } from "./virtio.ts";

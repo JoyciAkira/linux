@@ -766,6 +766,134 @@ export class EntropyDevice extends VirtioDevice<EmptyStruct> {
   }
 }
 
+const VirtioNetFeatures = {
+  MTU: 1n << 3n,
+  MAC: 1n << 5n,
+  STATUS: 1n << 16n,
+} as const;
+
+const VIRTIO_NET_HDR_BYTES = 12;
+
+class NetworkDeviceConfig extends Struct({
+  mac: FixedArray(U8, 6),
+  status: U16LE,
+  max_virtqueue_pairs: U16LE,
+  mtu: U16LE,
+}) {}
+
+/**
+ * Host-side Ethernet transport for virtio-net.  The bridge deliberately sees
+ * complete Ethernet frames, rather than TCP sockets, so guest AF_INET remains
+ * owned by the guest kernel.  A production bridge must translate frames into
+ * the frozen NBR-3 socket protocol explicitly; it must not substitute fetch
+ * or a host Node socket.
+ */
+export interface NetworkBridge {
+  setReceiver(receiver: (frame: Uint8Array) => void): void;
+  sendFrame(frame: Uint8Array): void | Promise<void>;
+}
+
+/** A deterministic Ethernet loopback bridge for kernel/device bring-up. */
+export class LoopbackNetworkBridge implements NetworkBridge {
+  #receiver?: (frame: Uint8Array) => void;
+
+  setReceiver(receiver: (frame: Uint8Array) => void): void {
+    this.#receiver = receiver;
+  }
+
+  sendFrame(frame: Uint8Array): void {
+    this.#receiver?.(Uint8Array.from(frame));
+  }
+}
+
+export class NetworkDevice extends VirtioDevice<NetworkDeviceConfig> {
+  ID = 1;
+  config_bytes = new Uint8Array(NetworkDeviceConfig.size);
+  config = new NetworkDeviceConfig(this.config_bytes);
+  #rxBuffers: Chain[] = [];
+  #pendingFrames: Uint8Array[] = [];
+
+  constructor(
+    private readonly bridge: NetworkBridge,
+    { mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01], mtu = 1500 }: {
+      mac?: readonly number[];
+      mtu?: number;
+    } = {},
+  ) {
+    super();
+    assert(mac.length === 6, "virtio-net MAC must contain six bytes");
+    assert(Number.isInteger(mtu) && mtu >= 68 && mtu <= 65_535, "invalid MTU");
+    this.features |=
+      VirtioNetFeatures.MTU |
+      VirtioNetFeatures.MAC |
+      VirtioNetFeatures.STATUS;
+    this.config.mac = Array.from(mac);
+    this.config.status = 1; // VIRTIO_NET_S_LINK_UP
+    this.config.max_virtqueue_pairs = 1;
+    this.config.mtu = mtu;
+    bridge.setReceiver((frame) => this.receiveFrame(frame));
+  }
+
+  receiveFrame(frame: Uint8Array): void {
+    this.#pendingFrames.push(Uint8Array.from(frame));
+    this.#flushRx();
+  }
+
+  #flushRx(): void {
+    let delivered = false;
+    while (this.#pendingFrames.length && this.#rxBuffers.length) {
+      const frame = this.#pendingFrames.shift()!;
+      const chain = this.#rxBuffers.shift()!;
+      const descriptors = [...chain];
+      const remaining = VIRTIO_NET_HDR_BYTES + frame.byteLength;
+      const capacity = descriptors.reduce((sum, desc) => sum + desc.array.byteLength, 0);
+      if (capacity < remaining) {
+        // Return the descriptor to the guest without a malformed partial packet.
+        chain.release(0);
+        continue;
+      }
+      const source = new Uint8Array(remaining);
+      source.set(frame, VIRTIO_NET_HDR_BYTES);
+      let offset = 0;
+      for (const desc of descriptors) {
+        assert(desc.writable, "virtio-net RX descriptors must be writable");
+        const n = Math.min(desc.array.byteLength, remaining - offset);
+        desc.array.set(source.subarray(offset, offset + n));
+        offset += n;
+        if (offset === remaining) break;
+      }
+      chain.release(remaining);
+      delivered = true;
+    }
+    if (delivered) this.trigger_interrupt("vring");
+  }
+
+  override async notify(vq: number): Promise<void> {
+    const queue = this.vqs[vq];
+    assert(queue);
+    if (vq === 0) {
+      for (const chain of queue) this.#rxBuffers.push(chain);
+      this.#flushRx();
+      return;
+    }
+    if (vq !== 1) {
+      console.error("NetworkDevice: unknown vq", vq);
+      return;
+    }
+    for (const chain of queue) {
+      const descriptors = [...chain];
+      const bytes = concat_bytes(descriptors.map((desc) => {
+        assert(!desc.writable, "virtio-net TX descriptors must be readable");
+        return desc.array;
+      }));
+      assert(bytes.byteLength >= VIRTIO_NET_HDR_BYTES, "short virtio-net TX header");
+      await this.bridge.sendFrame(bytes.subarray(VIRTIO_NET_HDR_BYTES));
+      chain.release(bytes.byteLength);
+    }
+    this.trigger_interrupt("vring");
+  }
+}
+
 export function virtio_imports({
   memory,
   devices,
