@@ -20,5 +20,8 @@
   "files": [
     "dist",
     "vmlinux.wasm"
-  ]
+  ],
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
 }
