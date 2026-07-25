@@ -237,6 +237,23 @@ struct pernet_operations __net_initdata loopback_net_ops = {
 	.init = loopback_net_init,
 };
 
+/* Auto-up lo: dev_open fires NETDEV_UP, which makes devinet.c
+ * auto-assign 127.0.0.1/8. Needed because blink WASM lacks SIOCSIFADDR.
+ */
+static int __init loopback_auto_up(void)
+{
+	struct net_device *lo = init_net.loopback_dev;
+
+	if (!lo)
+		return 0;
+
+	rtnl_lock();
+	dev_open(lo, NULL);
+	rtnl_unlock();
+	return 0;
+}
+device_initcall(loopback_auto_up);
+
 /* blackhole netdevice */
 static netdev_tx_t blackhole_netdev_xmit(struct sk_buff *skb,
 					 struct net_device *dev)

@@ -19,4 +19,8 @@
 /* Schema version for event format */
 #define ZN_EVENT_SCHEMA_VERSION                 1
 
+void zn_init_run_identity(void);
+u64 zn_get_next_event_seq(void);
+void zn_get_run_id(u64 *hi, u64 *lo);
+
 #endif /* _WASM_PROCESS_EVENTS_H */
