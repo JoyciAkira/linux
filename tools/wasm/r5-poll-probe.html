@@ -1,0 +1,47 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body><pre id="log"></pre>
+<script type="module">
+import { Machine, BlockDevice, ConsoleDevice, NetworkDevice, LoopbackNetworkBridge } from "./dist/index.js";
+const out=[]; const logEl=document.getElementById("log");
+window.__consoleOutput=out; window.__done=false; window.__result=null;
+function log(s){out.push(s);logEl.textContent+=s;}
+function dec(c){const u=new Uint8Array(c.byteLength);u.set(c);return new TextDecoder().decode(u);}
+function waitForRe(re,t){
+  return new Promise((res,rej)=>{
+    const s=Date.now();
+    (function tk(){
+      if(re.test(out.join(""))) return res();
+      if(Date.now()-s>t) return rej(new Error("TO:re"));
+      setTimeout(tk,250);
+    })();
+  });
+}
+async function main(){
+  const r=await fetch("./rootfs-r5-poll-probe.ext2");
+  const buf=new Uint8Array(await r.arrayBuffer());
+  const storage={capacity:buf.byteLength,read(o,l){return buf.subarray(o,o+l);},write(o,d){buf.set(d,o);return d.byteLength;}};
+  let sc;
+  const stdin=new ReadableStream({start(c){sc=c;}});
+  const stdout=new WritableStream({write(c){log(dec(c));}});
+  const send=s=>sc.enqueue(new TextEncoder().encode(s));
+  const bridge=new LoopbackNetworkBridge();
+  const netDev=new NetworkDevice(bridge);
+  const m=new Machine({
+    cmdline:"root=/dev/vda rootfstype=ext2 rw init=/bin/sh",
+    cpus:4,memoryMib:2048,
+    devices:[new BlockDevice(storage),new ConsoleDevice(stdin,stdout),netDev]
+  });
+  (async()=>{const rd=m.bootConsole.getReader();for(;;){const{value,done}=await rd.read();if(done)break;log(dec(value));}})();
+  m.on("error",e=>log("\n[MERR]"+String(e?.error??e)+"\n"));
+  await m.boot();
+  await waitForRe(/hush - the humble shell/,60000);
+  send("/bin/blink /bin/r5-poll-probe; echo PROBE_EXIT=$?\n");
+  const startWait=Date.now();
+  let timedOut=false;
+  try{ await waitForRe(/R5_POLL_PROBE_END:/,300000); }catch(e){ timedOut=true; log("\n>>> "+String(e)+"\n"); }
+  const text=out.join("");
+  const wallMs=Date.now()-startWait;
+  window.__result={output:text,timedOut,wallMs};
+  window.__done=true;
+}
+main().catch(e=>{log("\n[FATAL]"+String(e?.stack??e)+"\n");window.__done=true;});
+</script></body></html>

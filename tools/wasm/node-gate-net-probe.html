@@ -1,0 +1,109 @@
+<!doctype html><html><head><meta charset="utf-8"></head><body><pre id="log"></pre>
+<script type="module">
+import { Machine, BlockDevice, ConsoleDevice, NetworkDevice, LoopbackNetworkBridge } from "./dist/index.js";
+const out=[]; const logEl=document.getElementById("log");
+window.__consoleOutput=out; window.__done=false; window.__result=null;
+
+function log(s){out.push(s);logEl.textContent+=s;}
+function dec(c){const u=new Uint8Array(c.byteLength);u.set(c);return new TextDecoder().decode(u);}
+
+// Wait for a regex to appear in the accumulated output
+function waitForRe(re,t){
+  return new Promise((res,rej)=>{
+    const s=Date.now();
+    (function tk(){
+      if(re.test(out.join(""))) return res();
+      if(Date.now()-s>t) return rej(new Error("TO:re"));
+      setTimeout(tk,250);
+    })();
+  });
+}
+
+const params=new URLSearchParams(location.search);
+const code=params.get("code");
+const uuid=params.get("uuid");
+if(!code||!uuid) throw new Error("missing code or uuid parameter");
+
+const quote=s=>s.replaceAll("'","'\\''");
+
+async function main(){
+  const r=await fetch("./rootfs-d1f4.ext2");
+  const buf=new Uint8Array(await r.arrayBuffer());
+  const storage={
+    capacity:buf.byteLength,
+    read(o,l){return buf.subarray(o,o+l);},
+    write(o,d){buf.set(d,o);return d.byteLength;}
+  };
+  let sc;
+  const stdin=new ReadableStream({start(c){sc=c;}});
+  const stdout=new WritableStream({write(c){log(dec(c));}});
+  const send=s=>sc.enqueue(new TextEncoder().encode(s));
+
+  const bridge=new LoopbackNetworkBridge();
+  const netDev=new NetworkDevice(bridge);
+  const m=new Machine({
+    cmdline:"root=/dev/vda rootfstype=ext2 rw init=/bin/sh",
+    cpus:4,memoryMib:2048,
+    devices:[new BlockDevice(storage),new ConsoleDevice(stdin,stdout),netDev]
+  });
+
+  (async()=>{
+    const rd=m.bootConsole.getReader();
+    for(;;){const{value,done}=await rd.read();if(done)break;log(dec(value));}
+  })();
+
+  m.on("error",e=>log("\n[MERR]"+String(e?.error??e)+"\n"));
+  await m.boot();
+  await waitForRe(/hush - the humble shell/,60000);
+
+  // lo is auto-brought UP by kernel late_initcall (loopback_auto_up);
+  // no userspace ifconfig needed. Mount /proc for diagnostics only.
+  send("mount -t proc proc /proc 2>/dev/null\n");
+  send("echo NET_READY\n");
+  try { await waitForRe(/NET_READY/,10000); } catch(e) { log("\n>>> NET_READY TO: "+String(e)+"\n"); }
+
+  // 4-marker protocol: each marker carries the UUID
+  const beginTag = `ZN_BEGIN:${uuid}`;
+  const resultPrefix = `ZN_RESULT:${uuid}:`;
+  const endTag = `ZN_END:${uuid}`;
+  const exitPrefix = `GATE_EXIT:${uuid}=`;
+
+  // Guest script: BEGIN, await code, RESULT, END — each on its own line via console.log
+  const script = `(async()=>{
+    console.log("${beginTag}");
+    try {
+      const __value = await (${code});
+      if (__value !== undefined) console.log("${resultPrefix}" + String(__value));
+    } catch(__e) {
+      console.log("${resultPrefix}ERROR:" + String(__e && __e.message ? __e.message : __e).slice(0,150));
+      process.exitCode = 1;
+    }
+    console.log("${endTag}");
+  })()`;
+
+  // Shell echo includes UUID in exit marker so it's unique per run
+  send(`/bin/blink -e -s /bin/node -e '${quote(script)}'; echo ${exitPrefix}$?\n`);
+
+  const startWait = Date.now();
+  let timedOut = false;
+
+  // Wait for GATE_EXIT:<uuid>=<digit> — resolved exit code, not literal $?
+  const exitRe = new RegExp(exitPrefix.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + "\\d");
+  try {
+    await waitForRe(exitRe, 300000);
+  } catch(e) {
+    timedOut = true;
+    log("\n>>> " + String(e) + "\n");
+  }
+
+  const text = out.join("");
+  const wallMs = Date.now() - startWait;
+  window.__result = { output: text, timedOut, wallMs };
+  window.__done = true;
+}
+
+main().catch(e=>{
+  log("\n[FATAL]"+String(e?.stack??e)+"\n");
+  window.__done = true;
+});
+</script></body></html>
