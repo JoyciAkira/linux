@@ -30,6 +30,7 @@ export type WorkerMessage =
   | { type: "boot_console_write"; message: ArrayBuffer }
   | { type: "boot_console_close" }
   | { type: "run_on_main"; fn: number; arg: number }
+  | { type: "worker_done"; reason: string }
   | {
     type: "d1_trace_export";
     runId: string;
@@ -42,6 +43,13 @@ const unavailable = () => {
 };
 
 const postMessage = self.postMessage as (message: WorkerMessage) => void;
+
+let workerDoneSent = false;
+function signalWorkerDone(reason: string): void {
+  if (workerDoneSent) return;
+  workerDoneSent = true;
+  postMessage({ type: "worker_done", reason });
+}
 
 const d1TraceBuffer = new D1RingBuffer(4096);
 let d1TraceEnabled = false;
@@ -149,15 +157,21 @@ function user_imports({
             arg5: number,
           ): number => {
             const original_instance = instance;
-            const ret = kernel_instance.exports.syscall(
-              nr,
-              arg0,
-              arg1,
-              arg2,
-              arg3,
-              arg4,
-              arg5,
-            );
+            let ret: number;
+            try {
+              ret = kernel_instance.exports.syscall(
+                nr,
+                arg0,
+                arg1,
+                arg2,
+                arg3,
+                arg4,
+                arg5,
+              );
+            } catch (error) {
+              if (error === HALT_KERNEL) throw error;
+              throw error;
+            }
             if (instance !== original_instance) {
               // if the instance changed, then this was the exec syscall,
               // so call into the new instance:
@@ -185,6 +199,7 @@ function user_imports({
               get_thread_area: kernel_instance.exports.get_thread_area,
               get_args_length: kernel_instance.exports.get_args_length,
               get_args: kernel_instance.exports.get_args,
+              arch_wasm_poll: kernel_instance.exports.arch_wasm_poll,
             },
           });
 
@@ -214,6 +229,31 @@ function user_imports({
               continue;
             }
             if (error === HALT_KERNEL) throw error;
+            // G12: discriminate kernel do_task_dead (clean thread exit) from real errors.
+            // do_task_dead is the kernel's thread-end sentinel — it uses unreachable intentionally
+            // after sys_exit_group completes. This is NOT an error.
+            if (
+              error instanceof Error &&
+              error.name === "RuntimeError" &&
+              error.message.includes("unreachable")
+            ) {
+              const stack = (error as Error).stack || "";
+              if (stack.includes("do_task_dead")) {
+                // Clean kernel thread death — treat as HALT_USER, continue event loop
+                console.log("[G12-DIAG] do_task_dead clean exit, continuing event loop");
+                continue;
+              }
+              // G12: Do NOT catch user module exit() traps here.
+              // When a user module (lo-up, blink, etc.) calls exit(), musl wasm32's
+              // exit() is an unreachable stub. This trap MUST propagate to the kernel's
+              // task_entry_inner (process.c:134-149), which handles it by calling
+              // do_exit(SIGSEGV) -> full task cleanup -> do_task_dead().
+              // do_task_dead itself uses unreachable, which we catch above as clean exit.
+              // Catching the trap here (at worker level) corrupts kernel scheduler state
+              // because task_entry_inner never completes its cleanup path.
+              // Non-kernel unreachable — log and fall through to error handler
+              console.log("[G12-DIAG] non-kernel unreachable trap, stack:", stack);
+            }
             console.log("error running user module:", String(error), (error && (error as Error).stack) || "");
             if (d1TraceEnabled) {
               d1TraceBuffer.recordRuntimeError(error, d1RunId, {
@@ -266,6 +306,32 @@ function user_imports({
           console.warn("thread entrypoint reached the end without exiting");
         };
       },
+      // G12/M115 fork-mode child: the kernel child task resumes the parent's
+      // user state. The guest machine copy happens blink-side (blink's fork
+      // path: NewMachine + ax=0 + Blink).
+      //
+      // M115 memory isolation: plain fork (fn==NULL) spawned this worker with a
+      // FRESH WebAssembly.Memory (share_user_memory=false). To give the child a
+      // faithful copy of the parent's VAS we must seed the fresh memory from the
+      // parent's guest memory BEFORE resuming. The parent's guest memory object is
+      // passed as `parent_user_memory`; the fresh child buffer is `memory`.
+      // vfork 0x4111 (CLONE_VM) shares the parent memory and does not go through
+      // fork_user (it uses switch_entry), so this branch is fork-isolated only.
+      fork_user(pid) {
+        console.log("[FORK] child pid=" + pid + " resuming guest");
+        if (parent_memory && memory && memory !== parent_memory) {
+          const src = new Uint8Array(parent_memory.buffer);
+          const dst = new Uint8Array(memory.buffer);
+          // Copy the parent's full user VAS (limited to child buffer length).
+          dst.set(src.subarray(0, Math.min(src.length, dst.length)));
+        } else if (!parent_memory && memory) {
+          // No parent guest memory to copy (e.g. boot/idle): keep fresh (zeroed).
+          console.warn(
+            "[FORK] no parent guest memory to copy; child starts from zeroed VAS",
+          );
+        }
+        call_entry = call_start;
+      },
 
       // signal handling:
       call_signal_handler(fn, sig) {
@@ -279,11 +345,11 @@ function user_imports({
 
         const f = __indirect_function_table.get(fn);
         assert(
-          typeof f === "function" && f.length === 1,
+          typeof f === "function" && (f.length === 1 || f.length === 3),
           "Invalid function signature",
         );
 
-        f(sig); // TODO: the siginfo overload
+        if (f.length === 3) f(sig, 0, 0); else f(sig); // SA_SIGINFO: siginfo+ucontext placeholders
       },
 
       // memory:
@@ -375,8 +441,13 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
   const instance = new WebAssembly.Instance(vmlinux, imports) as Instance;
   try {
     instance.exports.__indirect_function_table.get(fn)!(arg);
+    signalWorkerDone("entrypoint_returned");
   } catch (error) {
-    if (error === HALT_KERNEL) return;
+    if (error === HALT_KERNEL) {
+      signalWorkerDone("halt_kernel");
+      return;
+    }
+    signalWorkerDone("uncaught_" + ((error as Error)?.name ?? "error"));
     throw error;
   }
 };
