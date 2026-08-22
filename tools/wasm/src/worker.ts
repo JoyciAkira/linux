@@ -100,6 +100,88 @@ function user_imports({
   }
   let call_entry = call_start;
 
+  // shared instantiation body; fall back to the parent's module/memory
+  // when this worker has not exec'd its own program (fork child).
+  const doInstantiate = () => {
+    assert(module);
+
+    if (!memory) {
+      const initial = 12288; // 768 MiB
+      const maximum = 32768; // 2 GiB tetto
+      memory = new WebAssembly.Memory({ initial, maximum, shared: true });
+      if (d1TraceEnabled) {
+        d1TraceBuffer.recordLifecycle("wasm_memory_constructed", d1RunId, {
+          detail: `initial=${initial} maximum=${maximum}`,
+        });
+      }
+    }
+
+    const kernel_instance = get_kernel_instance();
+
+    try {
+      const originalSyscallHandler = (
+        nr: number,
+        arg0: number,
+        arg1: number,
+        arg2: number,
+        arg3: number,
+        arg4: number,
+        arg5: number,
+      ): number => {
+        const original_instance = instance;
+        let ret: number;
+        try {
+          ret = kernel_instance.exports.syscall(
+            nr,
+            arg0,
+            arg1,
+            arg2,
+            arg3,
+            arg4,
+            arg5,
+          );
+        } catch (error) {
+          if (error === HALT_KERNEL) throw error;
+          throw error;
+        }
+        if (instance !== original_instance) {
+          call_entry = call_start;
+          throw HALT_USER;
+        }
+        return ret;
+      };
+
+      const wrappedSyscallHandler = wrapSyscall(originalSyscallHandler, {
+        buffer: d1TraceBuffer,
+        runId: d1RunId,
+        enabled: d1TraceEnabled,
+        processId: `worker-${self.name || "unknown"}`,
+        getThreadId: () => 0,
+      });
+
+      instance = new WebAssembly.Instance(module, {
+        env: { memory },
+        linux: {
+          syscall: wrappedSyscallHandler,
+          get_thread_area: kernel_instance.exports.get_thread_area,
+          get_args_length: kernel_instance.exports.get_args_length,
+          get_args: kernel_instance.exports.get_args,
+          arch_wasm_poll: kernel_instance.exports.arch_wasm_poll,
+        },
+      });
+
+      if ("memory" in instance.exports) {
+        assert(instance.exports.memory instanceof WebAssembly.Memory);
+        memory = instance.exports.memory;
+      }
+      if (d1TraceEnabled) {
+        d1TraceBuffer.recordLifecycle("kernel_module_instantiated", d1RunId);
+      }
+    } catch (error) {
+      console.log("error instantiating user module:", String(error));
+    }
+  };
+
   return {
     get module() {
       return module;
@@ -121,98 +203,19 @@ function user_imports({
         }
       },
       instantiate(fresh_memory) {
-        assert(module);
-
-        if (fresh_memory || !memory) {
-          // memory.grow su shared memory importata fallisce a runtime; quindi la
-          // memory deve nascere gia' abbastanza grande per processi come Node/blink
-          // (99MB file + heap V8). initial alto, non affidarsi a grow.
+        if (!module && parent_module) module = parent_module;
+        if (fresh_memory && memory) {
+          // caller explicitly wants a fresh memory: recreate it
           const initial = 12288; // 768 MiB iniziali
           const maximum = 32768; // 2 GiB tetto
-
-          memory = new WebAssembly.Memory({
-            initial,
-            maximum,
-            shared: true,
-          });
+          memory = new WebAssembly.Memory({ initial, maximum, shared: true });
           if (d1TraceEnabled) {
             d1TraceBuffer.recordLifecycle("wasm_memory_constructed", d1RunId, {
               detail: `initial=${initial} maximum=${maximum}`,
             });
           }
         }
-
-        const kernel_instance = get_kernel_instance();
-
-        // console.log("instantiating with", memory);
-        try {
-          // D1: Define original syscall handler (before wrapping)
-          const originalSyscallHandler = (
-            nr: number,
-            arg0: number,
-            arg1: number,
-            arg2: number,
-            arg3: number,
-            arg4: number,
-            arg5: number,
-          ): number => {
-            const original_instance = instance;
-            let ret: number;
-            try {
-              ret = kernel_instance.exports.syscall(
-                nr,
-                arg0,
-                arg1,
-                arg2,
-                arg3,
-                arg4,
-                arg5,
-              );
-            } catch (error) {
-              if (error === HALT_KERNEL) throw error;
-              throw error;
-            }
-            if (instance !== original_instance) {
-              // if the instance changed, then this was the exec syscall,
-              // so call into the new instance:
-              call_entry = call_start;
-
-              // and we never want to return to the caller of the syscall, so
-              // skip straight to the catch block of the parent's call_entry
-              throw HALT_USER;
-            }
-            return ret;
-          };
-
-          const wrappedSyscallHandler = wrapSyscall(originalSyscallHandler, {
-            buffer: d1TraceBuffer,
-            runId: d1RunId,
-            enabled: d1TraceEnabled,
-            processId: `worker-${self.name || "unknown"}`,
-            getThreadId: () => 0,
-          });
-
-          instance = new WebAssembly.Instance(module, {
-            env: { memory },
-            linux: {
-              syscall: wrappedSyscallHandler,
-              get_thread_area: kernel_instance.exports.get_thread_area,
-              get_args_length: kernel_instance.exports.get_args_length,
-              get_args: kernel_instance.exports.get_args,
-              arch_wasm_poll: kernel_instance.exports.arch_wasm_poll,
-            },
-          });
-
-          if ("memory" in instance.exports) {
-            assert(instance.exports.memory instanceof WebAssembly.Memory);
-            memory = instance.exports.memory;
-          }
-          if (d1TraceEnabled) {
-            d1TraceBuffer.recordLifecycle("kernel_module_instantiated", d1RunId);
-          }
-        } catch (error) {
-          console.log("error instantiating user module:", String(error));
-        }
+        doInstantiate();
       },
       call() {
         if (d1TraceEnabled) {
@@ -318,7 +321,33 @@ function user_imports({
       // vfork 0x4111 (CLONE_VM) shares the parent memory and does not go through
       // fork_user (it uses switch_entry), so this branch is fork-isolated only.
       fork_user(pid) {
-        console.log("[FORK] child pid=" + pid + " resuming guest");
+        console.log("[FORK] child pid=" + pid + " resuming guest pm_mod=" + typeof parent_module + ":" + String(parent_module).slice(0, 40) + " pm_mem=" + typeof parent_memory + ":" + String(parent_memory));
+        // Fork child worker has not exec'd its own program: bind to the
+        // parent's module and instantiate it into a fresh memory, then seed
+        // that memory with the parent's VAS before resuming.
+        if (!module && parent_module) {
+          module = parent_module;
+          console.log("[FORK] using parent_module");
+        }
+        if (!memory || memory === parent_memory) {
+          // Match the parent's guest memory size: the copied Machine pointer
+          // and heap live anywhere in the parent's address space.
+          const parentPages = parent_memory
+            ? Math.ceil(parent_memory.buffer.byteLength / 65536)
+            : 12288;
+          const initial = Math.max(parentPages, 12288);
+          const maximum = 32768; // 2 GiB tetto
+          console.log("[FORK] creating fresh child memory pages=" + initial);
+          memory = new WebAssembly.Memory({ initial, maximum, shared: true });
+          if (d1TraceEnabled) {
+            d1TraceBuffer.recordLifecycle("wasm_memory_constructed", d1RunId, {
+              detail: `fork-child initial=${initial} maximum=${maximum}`,
+            });
+          }
+        }
+        // instantiate the parent's blink module into the fresh child memory
+        doInstantiate();
+
         if (parent_memory && memory && memory !== parent_memory) {
           const src = new Uint8Array(parent_memory.buffer);
           const dst = new Uint8Array(memory.buffer);
@@ -330,7 +359,39 @@ function user_imports({
             "[FORK] no parent guest memory to copy; child starts from zeroed VAS",
           );
         }
-        call_entry = call_start;
+        // Release the parked parent: the VAS snapshot is now complete, so the
+        // parent may resume from its clone return point.
+        try {
+          const kexp = get_kernel_instance().exports as Record<string, unknown>;
+          if (typeof kexp.fork_copied === "function") {
+            (kexp.fork_copied as (pid: number) => void)(pid);
+            console.log("[FORK] ack fork_copied pid=" + pid);
+          }
+        } catch {
+          /* ack is best-effort; parent has a bounded timeout fallback */
+        }
+        // M115 USER_FORK_RESUME: the guest (blink x86 emulator) saved its
+        // Machine* + snapshot in its own .data, which is now copied verbatim
+        // into this fresh child memory. Jump straight to blink's resume
+        // export (reads those globals, rebinds g_machine, restores the x86
+        // continuation with ax=0) instead of re-running _start()/main() —
+        // the fork child carries no argv, so call_start would fail.
+        call_entry = () => {
+          assert(instance);
+          const { blink_user_fork_resume } = instance.exports;
+          assert(
+            typeof blink_user_fork_resume === "function",
+            "blink_user_fork_resume not found; not a x86-via-blink guest?",
+          );
+          console.log("[FORK] calling blink_user_fork_resume export");
+          try {
+            const rc = (blink_user_fork_resume as () => number)();
+            throw new Error("blink_user_fork_resume returned rc=" + rc);
+          } catch (e) {
+            console.log("[FORK] resume threw: " + String((e as Error)?.stack || e));
+            throw e;
+          }
+        };
       },
 
       // signal handling:
@@ -404,13 +465,17 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
       is_worker: true,
       memory,
       spawn_worker(fn, arg, name, user_module, user_memory) {
+        // The kernel import carries no module/memory (always null). Attach
+        // THIS worker's current guest module + memory: for fork(0) the caller
+        // is the parent, so the child receives the real references. Module is
+        // structured-cloneable; memory is shared:true → same buffer handle.
         postMessage({
           type: "spawn_worker",
           fn,
           arg,
           name,
-          user_module,
-          user_memory,
+          user_module: user_module ?? user.module,
+          user_memory: user_memory ?? user.memory,
         });
       },
       boot_console_write(message) {

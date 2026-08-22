@@ -45,8 +45,9 @@ struct task_struct *__switch_to(struct task_struct *from,
 	// pr_info("waiting cpu=%i task=%p in switch\n", cpu, from);
 
 	// this is set to true in do_task_dead:
-	if (wasm_get_thread_done())
+	if (wasm_get_thread_done()) {
 		wasm_kernel_halt_worker();
+	}
 
 	// sleep this worker:
 	/* memory.atomic.wait32 returns:
@@ -80,6 +81,8 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 	struct thread_info *info = task_thread_info(task);
 	struct task_struct *prev;
 
+
+
 	// early_printk("                       waiting cpu=%i task=%p in entry\n",
 	// 	     atomic_read(&info->running_cpu), task);
 
@@ -103,6 +106,7 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 
 	kfree(args);
 
+
 	// early_printk(
 	// 	"                       woke up cpu=%i task=%p prev=%p kcpu=%i in entry\n",
 	// 	raw_smp_processor_id(), task, prev, info->cpu);
@@ -120,8 +124,13 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 	// or its entrypoint threw an error (likely either an `unreachable` instruction being
 	// executed, or an out of range memory access.)
 
-	local_irq_enable();
-	do_exit(SIGSEGV);
+	/* FIRST-LIFECYCLE-FIX: an entry that reached its end is a completed
+	 * task role (fork-coalesce: this worker's exec branch already handed off
+	 * to the real child). A completed task must exit with its own result — a
+	 * fabricated SIGSEGV is the first invalid terminal transition, corrupting
+	 * the exit status on the way to wait4 (STATUS_PROPAGATION). do_exit(0)
+	 * keeps release_task / reap on the valid path. */
+	do_exit(0);
 }
 
 static void task_entry(void *args)

@@ -277,6 +277,9 @@ export class Machine extends EventEmitter<{
       user_module: WebAssembly.Module | null,
       user_memory: WebAssembly.Memory | null,
     ) => {
+      console.log(
+        `[SPW] fn=${fn} name=${name} umodule=${typeof user_module}:${String(user_module).slice(0, 40)} umem=${typeof user_memory}:${String(user_memory)}`,
+      );
       const worker = new Worker(new URL("./worker.js", import.meta.url), {
         type: "module",
         name,
@@ -306,6 +309,16 @@ export class Machine extends EventEmitter<{
           case "d1_trace_export": {
             const decoded = decodeD1TraceExport(event.data);
             if (decoded !== null) this.emit("d1_trace", decoded);
+            break;
+          }
+          case "worker_done": {
+            const idx = this.#workers.indexOf(worker);
+            if (idx !== -1) {
+              this.#workers.splice(idx, 1);
+            }
+            worker.onmessage = null;
+            worker.onerror = null;
+            worker.terminate();
             break;
           }
           default:
@@ -362,6 +375,7 @@ export class Machine extends EventEmitter<{
         instantiate: unavailable,
         call: unavailable,
         switch_entry: unavailable,
+        fork_user: unavailable,
         call_signal_handler: unavailable,
         read: unavailable,
         write: unavailable,
