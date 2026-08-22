@@ -15,6 +15,7 @@ export interface Instance extends WebAssembly.Instance {
     get_thread_area(): number;
     get_args_length(): number;
     get_args(buf: number): number;
+    arch_wasm_poll(): number;
   };
 }
 
@@ -63,6 +64,7 @@ export interface Imports {
     call_signal_handler(fn: number, sig: number): void;
     read(to: number, from: number, n: number): number;
     write(to: number, from: number, n: number): number;
+    fork_user(pid: number): void;
     write_zeroes(to: number, n: number): number;
   };
   virtio: {
