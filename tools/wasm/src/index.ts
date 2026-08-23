@@ -276,6 +276,7 @@ export class Machine extends EventEmitter<{
       name: string,
       user_module: WebAssembly.Module | null,
       user_memory: WebAssembly.Memory | null,
+      parent_tls_base = 0,
     ) => {
       console.log(
         `[SPW] fn=${fn} name=${name} umodule=${typeof user_module}:${String(user_module).slice(0, 40)} umem=${typeof user_memory}:${String(user_memory)}`,
@@ -334,6 +335,7 @@ export class Machine extends EventEmitter<{
           arg,
           vmlinux,
           memory: this.#memory,
+          parent_tls_base,
           parent_user_module: user_module,
           parent_user_memory: user_memory,
           d1TraceEnabled: this.#d1_trace_enabled,

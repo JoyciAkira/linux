@@ -15,6 +15,7 @@ export interface InitMessage {
   memory: WebAssembly.Memory;
   parent_user_module: WebAssembly.Module | null;
   parent_user_memory: WebAssembly.Memory | null;
+  parent_tls_base?: number;
   d1TraceEnabled?: boolean;
   d1RunId?: string;
 }
@@ -26,6 +27,7 @@ export type WorkerMessage =
     name: string;
     user_module: WebAssembly.Module | null;
     user_memory: WebAssembly.Memory | null;
+    parent_tls_base?: number;
   }
   | { type: "boot_console_write"; message: ArrayBuffer }
   | { type: "boot_console_close" }
@@ -74,9 +76,11 @@ function user_imports({
   get_kernel_instance,
   parent_user_module: parent_module,
   parent_user_memory: parent_memory,
+  parent_tls_base,
 }: {
   kernel_memory: WebAssembly.Memory;
   get_kernel_instance: () => Instance;
+  parent_tls_base: number;
   parent_user_module: WebAssembly.Module | null;
   parent_user_memory: WebAssembly.Memory | null;
 }): {
@@ -88,6 +92,7 @@ function user_imports({
 
   const kernel_memory_buffer = new Uint8Array(kernel_memory.buffer);
   let module: WebAssembly.Module | null = null;
+  let parentTlsBase = 0;
   let instance: WebAssembly.Instance | null = null;
   let memory: WebAssembly.Memory | null = null;
 
@@ -99,6 +104,15 @@ function user_imports({
     throw new Error("_start reached the end without exiting");
   }
   let call_entry = call_start;
+
+  // M115: apply the parent's TLS base to a freshly instantiated clone/thread
+  // instance so _Thread_local accesses land on the shared TLS block.
+  const applyTlsBase = () => {
+    if (!instance || !parent_tls_base) return;
+    const g = (instance.exports as Record<string, any>).__tls_base;
+    if (g && typeof g === "object" && "value" in g) g.value = parent_tls_base;
+  };
+
 
   // shared instantiation body; fall back to the parent's module/memory
   // when this worker has not exec'd its own program (fork child).
@@ -141,10 +155,22 @@ function user_imports({
             arg5,
           );
         } catch (error) {
-          if (error === HALT_KERNEL) throw error;
+          if (error === HALT_KERNEL) {
+            console.log(
+              `[M115] HALT_KERNEL worker=${self.name || "?"} nr=${nr} ` +
+                "(kernel threw sentinel — see preceding EXECVE/BINPRM trace)",
+            );
+            throw error;
+          }
           throw error;
         }
         if (instance !== original_instance) {
+          // execve committed: instance replaced. HALT_USER is the NORMAL
+          // control transfer to the fresh image (discriminator vs HALT_KERNEL).
+          console.log(
+            `[M115] EXEC_INSTANCE_CHANGED worker=${self.name || "?"} ` +
+              "→ HALT_USER (exec commit, normal)",
+          );
           call_entry = call_start;
           throw HALT_USER;
         }
@@ -204,6 +230,11 @@ function user_imports({
       },
       instantiate(fresh_memory) {
         if (!module && parent_module) module = parent_module;
+        // M115 CLONE_VM threads: instantiation rewrites .data defaults over
+        // the SHARED live memory, corrupting the parent's runtime globals.
+        // Snapshot/restore the .data window around it (blink links ≤2MB).
+        const threadShared = !fresh_memory && parent_memory && memory === parent_memory;
+        const snap = threadShared && memory ? memory.buffer.slice(0, 2 * 1024 * 1024) : null;
         if (fresh_memory && memory) {
           // caller explicitly wants a fresh memory: recreate it
           const initial = 12288; // 768 MiB iniziali
@@ -216,6 +247,9 @@ function user_imports({
           }
         }
         doInstantiate();
+        if (snap && memory) {
+          new Uint8Array(memory.buffer).set(new Uint8Array(snap), 0);
+        }
       },
       call() {
         if (d1TraceEnabled) {
@@ -287,6 +321,7 @@ function user_imports({
 
         call_entry = () => {
           assert(instance);
+          applyTlsBase();
 
           const { __indirect_function_table } = instance.exports;
           assert(
@@ -378,6 +413,7 @@ function user_imports({
         // the fork child carries no argv, so call_start would fail.
         call_entry = () => {
           assert(instance);
+          applyTlsBase();
           const { blink_user_fork_resume } = instance.exports;
           assert(
             typeof blink_user_fork_resume === "function",
@@ -437,8 +473,8 @@ function user_imports({
 }
 
 self.onmessage = (event: MessageEvent<InitMessage>) => {
-  const { fn, arg, vmlinux, memory, parent_user_module, parent_user_memory } =
-    event.data;
+  const { fn, arg, vmlinux, memory, parent_user_module, parent_user_memory,
+    parent_tls_base } = event.data;
 
   if (event.data.d1TraceEnabled === true) {
     d1TraceEnabled = true;
@@ -452,6 +488,7 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
     get_kernel_instance: () => instance,
     parent_user_module,
     parent_user_memory,
+    parent_tls_base: parent_tls_base ?? 0,
   });
 
   const imports = {
@@ -469,6 +506,14 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
         // THIS worker's current guest module + memory: for fork(0) the caller
         // is the parent, so the child receives the real references. Module is
         // structured-cloneable; memory is shared:true → same buffer handle.
+        const tlsBase = (() => {
+          try {
+            const g = (instance.exports as Record<string, any>).__tls_base;
+            return g && typeof g === "object" && "value" in g ? g.value : 0;
+          } catch {
+            return 0;
+          }
+        })();
         postMessage({
           type: "spawn_worker",
           fn,
@@ -476,6 +521,7 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
           name,
           user_module: user_module ?? user.module,
           user_memory: user_memory ?? user.memory,
+          parent_tls_base: tlsBase,
         });
       },
       boot_console_write(message) {
