@@ -149,6 +149,9 @@ static void __exit_signal(struct task_struct *tsk)
 
 	sighand = rcu_dereference_check(tsk->sighand,
 					lockdep_tasklist_lock_is_held());
+	/* G12 fix: already unhashed from a previous release_task pass. */
+	if (!sighand)
+		return;
 	spin_lock(&sighand->siglock);
 
 #ifdef CONFIG_POSIX_TIMERS
@@ -206,6 +209,9 @@ static void __exit_signal(struct task_struct *tsk)
 	tsk->sighand = NULL;
 	spin_unlock(&sighand->siglock);
 
+	pr_err("G12-DIAG: __exit_signal pid=%d tgid=%d group_dead=%d sighand=%px count=%d\n",
+	       tsk->pid, tsk->tgid, group_dead, sighand,
+	       refcount_read(&sighand->count));
 	__cleanup_sighand(sighand);
 	clear_tsk_thread_flag(tsk, TIF_SIGPENDING);
 	if (group_dead) {
@@ -240,6 +246,17 @@ void release_task(struct task_struct *p)
 	struct task_struct *leader;
 	struct pid *thread_pid;
 	int zap_leader;
+
+	pr_err("G12-DIAG: release_task entry pid=%d tgid=%d exit_state=%x use_count=%d sighand=%px\n",
+	       p->pid, p->tgid, p->exit_state, refcount_read(&p->usage), p->sighand);
+	/* G12 fix: task already fully reaped (sighand NULL) - do not run the
+	 * teardown a second time; that underflows the freed sighand. */
+	if (!p->sighand) {
+		pr_err("G12-FIX: release_task skip pid=%d use_count=%d (already reaped)\n",
+		       p->pid, refcount_read(&p->usage));
+		dump_stack();
+		return;
+	}
 repeat:
 	/* don't need to get the RCU readlock here - the process is dead and
 	 * can't be modifying its own credentials. But shut RCU-lockdep up */
@@ -806,6 +823,33 @@ static void synchronize_group_exit(struct task_struct *tsk, long code)
 
 void __noreturn do_exit(long code)
 {
+	pr_err("G12-DIAG: do_exit entry pid=%d tgid=%d code=%lx exit_state=%x comm=%s\n",
+	       current->pid, current->tgid, code, current->exit_state, current->comm);
+
+	/* G12 fix: this worker already exited its task (exit_state set, sighand
+	 * torn down). The host resumed the dead worker and it re-issued
+	 * sys_exit. Never run the exit teardown twice: halt the worker. */
+	if (current->exit_state != 0) {
+		pr_err("G12-FIX: do_exit re-entry on dead task pid=%d exit_state=%x; parking dead task in scheduler\n",
+		       current->pid, current->exit_state);
+		/* G12 fix: the task already ran its full exit teardown. Returning
+		 * lets the guest unwind and the host call_entry reach userExit()
+		 * for a clean worker termination. */
+		/* G12 fix: park the dead task in the scheduler: releasing the
+		 * vCPU lets the leader complete, and TASK_STOPPED (off runqueue)
+		 * guarantees it is never dispatched again. No refcount touch:
+		 * state != TASK_DEAD so finish_task_switch won't put it. */
+		local_irq_enable();
+		wasm_kernel_boot_console_write("G12-TERMINATE-WORKER\n", 20);
+		for (;;)
+			cpu_relax();
+	}
+#ifdef CONFIG_WASM
+	if (irqs_disabled()) {
+		pr_err("G12-FIX: do_exit entry with IRQs disabled pid=%d; re-enabling\n", current->pid);
+		local_irq_enable();
+	}
+#endif
 	struct task_struct *tsk = current;
 	int group_dead;
 
@@ -889,6 +933,7 @@ void __noreturn do_exit(long code)
 
 	exit_tasks_rcu_start();
 	exit_notify(tsk, group_dead);
+	pr_err("G12-DIAG: post-exit_notify pid=%d state=%x\n", tsk->pid, tsk->exit_state);
 	proc_exit_connector(tsk);
 	mpol_put_task_policy(tsk);
 #ifdef CONFIG_FUTEX
@@ -1581,6 +1626,8 @@ static int do_wait_pid(struct wait_opts *wo)
 
 static long do_wait(struct wait_opts *wo)
 {
+	if (current->pid == 1)
+		pr_err("G12-DIAG: do_wait entry pid=1\n");
 	int retval;
 
 	trace_sched_process_wait(wo->wo_pid);
@@ -1630,7 +1677,11 @@ notask:
 	if (!retval && !(wo->wo_flags & WNOHANG)) {
 		retval = -ERESTARTSYS;
 		if (!signal_pending(current)) {
+	if (current->pid == 1)
+		pr_err("G12-DIAG: do_wait sleep pid=1\n");
 			schedule();
+	if (current->pid == 1)
+		pr_err("G12-DIAG: do_wait woke pid=1\n");
 			goto repeat;
 		}
 	}
@@ -1801,6 +1852,9 @@ int kernel_wait(pid_t pid, int *stat)
 SYSCALL_DEFINE4(wait4, pid_t, upid, int __user *, stat_addr,
 		int, options, struct rusage __user *, ru)
 {
+	if (current->pid == 1)
+		pr_err("G12-DIAG: sys_wait4 entry pid=1 upid=%d options=%x\n",
+		       upid, options);
 	struct rusage r;
 	long err = kernel_wait4(upid, stat_addr, options, ru ? &r : NULL);
 

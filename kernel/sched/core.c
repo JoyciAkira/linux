@@ -4361,6 +4361,8 @@ struct task_struct *cpu_curr_snapshot(int cpu)
  */
 int wake_up_process(struct task_struct *p)
 {
+	if (p->pid == 1 || p->pid == 23 || p->pid == 24)
+		pr_err("G12-DIAG: wake_up pid=%d cpu=%d\n", p->pid, raw_smp_processor_id());
 	return try_to_wake_up(p, TASK_NORMAL, 0);
 }
 EXPORT_SYMBOL(wake_up_process);
@@ -5195,6 +5197,8 @@ static __always_inline struct rq *
 context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next, struct rq_flags *rf)
 {
+	if (unlikely(prev->pid == 1 || next->pid == 1 || prev->pid == 23 || next->pid == 23 || prev->pid == 24 || next->pid == 24))
+		pr_err("G12-DIAG: ctx_switch prev=%d next=%d cpu=%d\n", prev->pid, next->pid, raw_smp_processor_id());
 	prepare_task_switch(rq, prev, next);
 
 	/*
@@ -6575,6 +6579,7 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 
 void __noreturn do_task_dead(void)
 {
+	pr_err("G12-DIAG: do_task_dead entry pid=%d state=%x\n", current->pid, current->exit_state);
 	/* Causes final put_task_struct in finish_task_switch(): */
 	set_special_state(TASK_DEAD);
 
@@ -6659,6 +6664,12 @@ asmlinkage __visible void __sched schedule(void)
 {
 	struct task_struct *tsk = current;
 
+	if (unlikely(current->pid == 1 || current->pid == 23 || current->pid == 24))
+		pr_err("G12-DIAG: schedule entry pid=%d state=%lx ret=%px\n",
+		       current->pid, (unsigned long)current->__state,
+		       __builtin_return_address(0));
+		if (current->pid == 23 && (current->__state & 0x2000))
+			dump_stack();
 	sched_submit_work(tsk);
 	do {
 		preempt_disable();
@@ -6666,6 +6677,8 @@ asmlinkage __visible void __sched schedule(void)
 		sched_preempt_enable_no_resched();
 	} while (need_resched());
 	sched_update_worker(tsk);
+	if (unlikely(current->pid == 1 || current->pid == 23 || current->pid == 24))
+		pr_err("G12-DIAG: schedule resume pid=%d\n", current->pid);
 }
 EXPORT_SYMBOL(schedule);
 

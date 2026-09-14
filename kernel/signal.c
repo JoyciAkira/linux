@@ -2029,6 +2029,9 @@ static void do_notify_pidfd(struct task_struct *task)
  */
 bool do_notify_parent(struct task_struct *tsk, int sig)
 {
+	pr_err("G12-DIAG: do_notify_parent tsk_pid=%d tgid=%d sig=%d exit_signal=%d parent_pid=%d\n",
+	       tsk->pid, tsk->tgid, sig, tsk->exit_signal,
+	       tsk->real_parent ? tsk->real_parent->pid : -1);
 	struct kernel_siginfo info;
 	unsigned long flags;
 	struct sighand_struct *psig;

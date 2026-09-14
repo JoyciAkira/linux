@@ -38,6 +38,7 @@ void wasm_import(user, call)(void);
 void wasm_import(user, switch_entry)(u32 fn, u32 arg);
 void wasm_import(user, call_signal_handler)(u32 fn, u32 sig);
 void wasm_import(user, halt_signal_handler)(void);
+void wasm_import(user, fork_user)(u32 pid);
 
 int wasm_import(user, read)(void *to, const void __user *from, unsigned long n);
 int wasm_import(user, write)(void __user *to, const void *from, unsigned long n);

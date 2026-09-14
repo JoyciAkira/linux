@@ -101,6 +101,17 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 	set_current_cpu(atomic_read(&info->running_cpu));
 	BUG_ON(raw_smp_processor_id() < 0);
 
+	/* G12 thread-exit fix: a worker whose task already exited must never
+	 * re-enter the scheduler path (re-entry reruns do_exit, double
+	 * release_task and underflows the shared sighand refcount). Halt. */
+	if (READ_ONCE(task->exit_state) != 0) {
+		pr_err("G12-FIX: task_entry_inner re-entry on dead task pid=%d exit_state=%x; halting worker\n",
+		       task->pid, task->exit_state);
+		wasm_kernel_halt_worker();
+		for (;;)
+			;
+	}
+
 	prev = get_current_task_on(raw_smp_processor_id());
 	set_current_task(task);
 
@@ -119,6 +130,17 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 	fn_ret = fn(fn_arg);
 
 	wasm_user_call();
+
+	/* G12 fix: if the task already exited through another path (execve
+	 * handoff, signal death), never call do_exit() again from this worker.
+	 * Re-entry loops do_task_dead -> BUG and re-runs release_task. */
+	if (READ_ONCE(task->exit_state) != 0) {
+		pr_err("G12-FIX: worker pid=%d returned with exit_state=%x; halting instead of do_exit\n",
+		       task->pid, task->exit_state);
+		wasm_kernel_halt_worker();
+		for (;;)
+			;
+	}
 
 	// if we're here, either the thread returned from its entrypoint without exiting,
 	// or its entrypoint threw an error (likely either an `unreachable` instruction being

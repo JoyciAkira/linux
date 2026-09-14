@@ -165,6 +165,9 @@ SYSCALL_DEFINE6(futex, u32 __user *, uaddr, int, op, u32, val,
 		const struct __kernel_timespec __user *, utime,
 		u32 __user *, uaddr2, u32, val3)
 {
+	if (current->pid == 23 || current->pid == 24)
+		pr_err("G12-DIAG: futex entry pid=%d op=%x uaddr=%px val=%x\n",
+		       current->pid, op, uaddr, val);
 	int ret, cmd = op & FUTEX_CMD_MASK;
 	ktime_t t, *tp = NULL;
 	struct timespec64 ts;

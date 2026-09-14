@@ -1470,6 +1470,10 @@ static int wait_for_vfork_done(struct task_struct *child,
  */
 static void mm_release(struct task_struct *tsk, struct mm_struct *mm)
 {
+	int ret = 0, v = -1;
+	if (tsk->pid == 23 || tsk->pid == 24)
+		pr_err("G12-DIAG: mm_release pid=%d clear_child_tid=%px\n",
+		       tsk->pid, tsk->clear_child_tid);
 	uprobe_free_utask(tsk);
 
 	/* Get rid of any cached register state */
@@ -1481,14 +1485,22 @@ static void mm_release(struct task_struct *tsk, struct mm_struct *mm)
 	 * purposes.
 	 */
 	if (tsk->clear_child_tid) {
+		pr_err("G12-DIAG: clear_child_tid pid=%d mm_users=%d addr=%px\n",
+		       tsk->pid, atomic_read(&mm->mm_users), tsk->clear_child_tid);
 		if (atomic_read(&mm->mm_users) > 1) {
 			/*
 			 * We don't check the error code - if userspace has
 			 * not set up a proper pointer then tough luck.
 			 */
-			put_user(0, tsk->clear_child_tid);
+			ret = put_user(0, tsk->clear_child_tid);
 			do_futex(tsk->clear_child_tid, FUTEX_WAKE,
 					1, NULL, NULL, 0, 0);
+			if (!get_user(v, tsk->clear_child_tid) && !ret)
+				pr_err("G12-DIAG: ctid cleared pid=%d word=%d ret=%d\n",
+				       tsk->pid, v, ret);
+			else
+				pr_err("G12-DIAG: ctid CLEAR FAILED pid=%d put_ret=%d\n",
+				       tsk->pid, ret);
 		}
 		tsk->clear_child_tid = NULL;
 	}
@@ -1668,6 +1680,8 @@ static int copy_sighand(unsigned long clone_flags, struct task_struct *tsk)
 
 void __cleanup_sighand(struct sighand_struct *sighand)
 {
+	pr_err("G12-DIAG: __cleanup_sighand sighand=%px count=%d\n",
+	       sighand, refcount_read(&sighand->count));
 	if (refcount_dec_and_test(&sighand->count)) {
 		signalfd_cleanup(sighand);
 		/*
@@ -1777,6 +1791,9 @@ static void copy_seccomp(struct task_struct *p)
 
 SYSCALL_DEFINE1(set_tid_address, int __user *, tidptr)
 {
+	if (current->pid == 23 || current->pid == 24)
+		pr_err("G12-DIAG: set_tid_address pid=%d tidptr=%px\n",
+		       current->pid, tidptr);
 	current->clear_child_tid = tidptr;
 
 	return task_pid_vnr(current);

@@ -42,6 +42,9 @@ typedef struct {
 typedef struct {
 	__u8 b[16];
 } uuid_le;
+#ifdef __APPLE__
+#define uuid_t kernel_uuid_t
+#endif
 typedef struct {
 	__u8 b[16];
 } uuid_t;

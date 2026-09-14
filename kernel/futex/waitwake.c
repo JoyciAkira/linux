@@ -636,6 +636,11 @@ int futex_wait(u32 __user *uaddr, unsigned int flags, u32 val, ktime_t *abs_time
 	struct futex_hash_bucket *hb;
 	struct futex_q q = futex_q_init;
 	int ret;
+	u32 cur;
+
+	if (current->pid == 23 && !get_user(cur, uaddr))
+		pr_err("G12-DIAG: futex_wait pid=23 uaddr=%px val=%u cur=%u\n",
+		       uaddr, val, cur);
 
 	if (!bitset)
 		return -EINVAL;
