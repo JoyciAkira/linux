@@ -147,7 +147,7 @@ export function kernel_imports(
     },
     halt_worker: () => {
       if (!is_worker) throw new Error("Halt called in main thread");
-      self.close();
+      (globalThis.close ?? (() => {}))();
       throw HALT_KERNEL;
     },
 
