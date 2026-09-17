@@ -3,6 +3,12 @@ import { assert, EventEmitter, unreachable } from "./util.ts";
 import { virtio_imports, VirtioDevice } from "./virtio.ts";
 import { type Imports, type Instance, kernel_imports } from "./wasm.ts";
 import type { InitMessage, WorkerMessage } from "./worker.ts";
+import {
+  decodeKernelProcessEvent,
+  type KernelProcessEvent,
+  type RawKernelProcessEvent,
+  type RawProcessEventMessage,
+} from "./process-events.ts";
 
 export {
   BlockDevice,
@@ -15,6 +21,20 @@ export {
   type VsockConnection,
   VsockDevice,
 } from "./virtio.ts";
+export {
+  PROCESS_EVENT_KIND,
+  decodeKernelProcessEvent,
+  decodeLinuxWaitStatus,
+  formatRunId,
+} from "./process-events.ts";
+export type {
+  KernelProcessEvent,
+  KernelProcessEventKind,
+  KernelProcessEventName,
+  KernelTerminalStatus,
+  RawKernelProcessEvent,
+  RawProcessEventMessage,
+} from "./process-events.ts";
 
 const resources = (async () => {
   const vmlinux_response = fetch(
@@ -124,6 +144,7 @@ export function decodeD1TraceExport(
 export class Machine extends EventEmitter<{
   error: ErrorEvent;
   d1_trace: D1TraceExport;
+  process_event: KernelProcessEvent;
 }> {
   #boot_console: TransformStream<Uint8Array, Uint8Array>;
   #boot_console_writer: WritableStreamDefaultWriter<Uint8Array>;
@@ -153,6 +174,24 @@ export class Machine extends EventEmitter<{
 
   get bootConsole() {
     return this.#boot_console.readable;
+  }
+
+  #dispatchProcessEvent(raw: RawKernelProcessEvent): void {
+    const decoded = decodeKernelProcessEvent(raw);
+    this.emit("process_event", decoded);
+    this.#process_event_handler?.(
+      raw.event_kind,
+      raw.run_id_hi,
+      raw.run_id_lo,
+      raw.event_seq,
+      raw.pid,
+      raw.tgid,
+      raw.ppid,
+      raw.worker_id,
+      raw.data0,
+      raw.data1,
+      raw.comm,
+    );
   }
 
   constructor(options: {
@@ -286,7 +325,9 @@ export class Machine extends EventEmitter<{
         name,
       });
       this.#workers.push(worker);
-      worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
+      worker.onmessage = (
+        event: MessageEvent<WorkerMessage | RawProcessEventMessage>,
+      ) => {
         switch (event.data.type) {
           case "spawn_worker":
             spawn_worker(
@@ -307,6 +348,11 @@ export class Machine extends EventEmitter<{
             instance.exports.__indirect_function_table
               .get(event.data.fn)!(event.data.arg);
             break;
+          case "process_event": {
+            const raw: RawKernelProcessEvent = event.data;
+            this.#dispatchProcessEvent(raw);
+            break;
+          }
           case "d1_trace_export": {
             const decoded = decodeD1TraceExport(event.data);
             if (decoded !== null) this.emit("d1_trace", decoded);
@@ -370,7 +416,33 @@ export class Machine extends EventEmitter<{
         run_on_main: unavailable,
         get_user_module: unavailable,
         get_user_memory: unavailable,
-        process_event_handler: this.#process_event_handler,
+        process_event_handler: (
+          event_kind,
+          run_id_hi,
+          run_id_lo,
+          event_seq,
+          pid,
+          tgid,
+          ppid,
+          worker_id,
+          data0,
+          data1,
+          comm,
+        ) => {
+          this.#dispatchProcessEvent({
+            event_kind,
+            run_id_hi,
+            run_id_lo,
+            event_seq,
+            pid,
+            tgid,
+            ppid,
+            worker_id,
+            data0,
+            data1,
+            comm,
+          });
+        },
       }),
       user: {
         compile: unavailable,

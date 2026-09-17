@@ -1,3 +1,8 @@
+import {
+  makeRawProcessEventMessage,
+  type RawKernelProcessEvent,
+} from "./process-events.ts";
+
 export interface Instance extends WebAssembly.Instance {
   exports: {
     __indirect_function_table: WebAssembly.Table;
@@ -213,10 +218,10 @@ export function kernel_imports(
       comm,
       comm_len,
     ) => {
+      const comm_str = new TextDecoder().decode(
+        mem.slice(comm, comm + comm_len),
+      );
       if (process_event_handler) {
-        const comm_str = new TextDecoder().decode(
-          mem.slice(comm, comm + comm_len),
-        );
         process_event_handler(
           event_kind,
           run_id_hi,
@@ -229,6 +234,29 @@ export function kernel_imports(
           data0,
           data1,
           comm_str,
+        );
+        return;
+      }
+
+      // Kernel process events may originate on any wasm worker. The main
+      // Machine owns the authoritative event stream, so worker-side imports
+      // must forward the raw event instead of silently dropping it.
+      if (is_worker) {
+        const raw: RawKernelProcessEvent = {
+          event_kind,
+          run_id_hi,
+          run_id_lo,
+          event_seq,
+          pid,
+          tgid,
+          ppid,
+          worker_id,
+          data0,
+          data1,
+          comm: comm_str,
+        };
+        (self as DedicatedWorkerGlobalScope).postMessage(
+          makeRawProcessEventMessage(raw),
         );
       }
     },
