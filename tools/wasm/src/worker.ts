@@ -144,6 +144,12 @@ function user_imports({
       ): number => {
         const original_instance = instance;
         let ret: number;
+        if (nr === 245) {
+          // SYS_wasm_get_args: musl wasm32 crt1.o calls this to receive argc/argv/envp
+          if (typeof kernel_instance.exports.get_args === "function") {
+            return kernel_instance.exports.get_args(arg0);
+          }
+        }
         try {
           ret = kernel_instance.exports.syscall(
             nr,
@@ -193,6 +199,14 @@ function user_imports({
           get_args_length: kernel_instance.exports.get_args_length,
           get_args: kernel_instance.exports.get_args,
           arch_wasm_poll: kernel_instance.exports.arch_wasm_poll,
+          // __wasm_copy_siginfo(siginfo_t *info): sig=2 (i32) -> i32
+          // Populates siginfo_t struct in guest memory, returns 0 on success.
+          copy_siginfo: (info_ptr: number): number => {
+            if (memory && info_ptr) {
+              new Uint8Array(memory.buffer, info_ptr, 128).fill(0);
+            }
+            return 0;
+          },
         },
       });
 
