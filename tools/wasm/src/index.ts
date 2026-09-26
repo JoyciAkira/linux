@@ -21,6 +21,12 @@ export {
   type VsockConnection,
   VsockDevice,
 } from "./virtio.ts";
+export class WebSocketNetworkBridge {
+  url: string;
+  constructor(url: string) {
+    this.url = url;
+  }
+}
 export {
   PROCESS_EVENT_KIND,
   decodeKernelProcessEvent,
