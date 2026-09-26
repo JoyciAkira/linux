@@ -70,6 +70,47 @@ export function exportD1Trace(): void {
   const metadata = d1TraceBuffer.getMetadata();
   postMessage({ type: "d1_trace_export", runId: d1RunId, records, metadata });
 }
+const ASM_GENERIC_NAMES: Record<number, string> = {
+  19: "eventfd2",
+  20: "epoll_create1",
+  21: "epoll_ctl",
+  22: "epoll_pwait",
+  25: "fcntl",
+  29: "ioctl",
+  56: "openat",
+  57: "close",
+  59: "pipe2",
+  62: "lseek",
+  63: "read",
+  64: "write",
+  66: "writev",
+  78: "readlinkat",
+  79: "newfstatat",
+  80: "fstat",
+  93: "exit",
+  94: "exit_group",
+  96: "set_tid_address",
+  98: "futex",
+  113: "clock_gettime",
+  114: "clock_getres",
+  115: "clock_nanosleep",
+  134: "rt_sigaction",
+  135: "rt_sigprocmask",
+  160: "uname",
+  214: "brk",
+  215: "munmap",
+  220: "clone",
+  222: "mmap",
+  226: "mprotect",
+  244: "set_thread_area",
+  245: "wasm_get_args",
+  260: "wait4",
+  261: "prlimit64",
+  422: "futex_waitv",
+  208: "setsockopt",
+  209: "getsockopt",
+};
+
 
 function user_imports({
   kernel_memory,
@@ -100,6 +141,7 @@ function user_imports({
     assert(instance);
     const { _start } = instance.exports;
     assert(typeof _start === "function", "_start not found");
+    console.log(`[LOADER:_start_begin] worker=${self.name || "?"}`);
     _start();
     throw new Error("_start reached the end without exiting");
   }
@@ -180,6 +222,10 @@ function user_imports({
           call_entry = call_start;
           throw HALT_USER;
         }
+        const sname = ASM_GENERIC_NAMES[nr] || `nr_${nr}`;
+        if (nr === 19 || nr === 20 || nr === 21 || nr === 22 || nr === 98 || nr === 422 || (ret < 0 && ret !== -11 && ret !== -2 && ret !== -4 && ret !== -10)) {
+          console.log(`[SYSCALL] worker=${self.name || "?"} nr=${nr} (${sname}) a0=${arg0} a1=${arg1} a2=${arg2} ret=${ret} (errno=${ret < 0 ? -ret : 0})`);
+        }
         return ret;
       };
 
@@ -191,6 +237,7 @@ function user_imports({
         getThreadId: () => 0,
       });
 
+      console.log(`[LOADER:shared_memory_validated] worker=${self.name || "?"} bytes=${memory.buffer.byteLength}`);
       instance = new WebAssembly.Instance(module, {
         env: { memory },
         linux: {
@@ -209,7 +256,7 @@ function user_imports({
           },
         },
       });
-
+      console.log(`[LOADER:instantiate_success] worker=${self.name || "?"}`);
       if ("memory" in instance.exports) {
         assert(instance.exports.memory instanceof WebAssembly.Memory);
         memory = instance.exports.memory;
@@ -218,7 +265,7 @@ function user_imports({
         d1TraceBuffer.recordLifecycle("kernel_module_instantiated", d1RunId);
       }
     } catch (error) {
-      console.log("error instantiating user module:", String(error));
+      console.log(`[LOADER:instantiate_fail] worker=${self.name || "?"} error=${String(error)}`);
     }
   };
 
@@ -232,17 +279,23 @@ function user_imports({
     imports: {
       // program management:
       compile(buf, size) {
+        console.log(`[LOADER:compile_begin] worker=${self.name || "?"} size=${size}`);
         const bytes = new Uint8Array(
           kernel_memory_buffer.slice(buf, buf + size),
         );
         try {
           module = new WebAssembly.Module(bytes);
+          const expNames = WebAssembly.Module.exports(module).map(e => e.name).join(",");
+          console.log(`[LOADER:compile_module_ok] worker=${self.name || "?"} exports=${expNames}`);
+          console.log(`[LOADER:compile_end] worker=${self.name || "?"} ret=0`);
           return 0;
-        } catch {
+        } catch (err) {
+          console.log(`[LOADER:compile_fail] worker=${self.name || "?"} error=${String(err)}`);
           return -8; // exec format error
         }
       },
       instantiate(fresh_memory) {
+        console.log(`[LOADER:instantiate_begin] worker=${self.name || "?"} fresh_memory=${fresh_memory}`);
         if (!module && parent_module) module = parent_module;
         // M115 CLONE_VM threads: instantiation rewrites .data defaults over
         // the SHARED live memory, corrupting the parent's runtime globals.
@@ -261,7 +314,7 @@ function user_imports({
           }
         }
         doInstantiate();
-        if (snap && memory) {
+        if (snap && memory && !threadShared) {
           new Uint8Array(memory.buffer).set(new Uint8Array(snap), 0);
         }
       },

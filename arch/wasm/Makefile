@@ -18,9 +18,9 @@ arch/wasm/vmlinux.wat: vmlinux.o FORCE
 	$(call if_changed,wasm2wat)
 
 quiet_cmd_wasm_sections = GEN     $@
-      cmd_wasm_sections = $(PERL) arch/wasm/scripts/sections.pl <$< >$@
+      cmd_wasm_sections = $(PERL) $(srctree)/arch/wasm/scripts/sections.pl <$< >$@
 
-arch/wasm/sections.json: arch/wasm/vmlinux.wat arch/wasm/scripts/sections.pl FORCE
+arch/wasm/sections.json: arch/wasm/vmlinux.wat $(srctree)/arch/wasm/scripts/sections.pl FORCE
 	$(call if_changed,wasm_sections)
 
 quiet_cmd_wasm_objcopy = OBJCOPY $@
@@ -30,6 +30,7 @@ quiet_cmd_wasm_objcopy = OBJCOPY $@
 		$< $@
 
 tools/wasm/vmlinux.wasm: vmlinux.o arch/wasm/sections.json FORCE
+	@mkdir -p $(@D)
 	$(call if_changed,wasm_objcopy)
 
 define archhelp

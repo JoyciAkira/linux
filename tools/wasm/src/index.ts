@@ -336,6 +336,7 @@ export class Machine extends EventEmitter<{
               event.data.name,
               event.data.user_module,
               event.data.user_memory,
+              event.data.parent_tls_base,
             );
             break;
           case "boot_console_write":
