@@ -59,13 +59,20 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 	     unsigned long arg5)
 {
 	struct pt_regs *regs = current_pt_regs();
+	static atomic_t __erestart_dbg_depth = ATOMIC_INIT(0);
 	long ret;
+	int depth;
 
 	regs->user_mode = 0;
 	nr = syscall_enter_from_user_mode(regs, nr);
 
 	if (nr < 0 || nr >= ARRAY_SIZE(syscall_table))
 		return -ENOSYS;
+
+	depth = atomic_inc_return(&__erestart_dbg_depth);
+	if (depth > 1)
+		pr_err("ERESTART-TRACE: nested syscall entry depth=%d nr=%ld pid=%d\n",
+		       depth, nr, current->pid);
 
 	regs->syscall_nr = nr;
 	regs->syscall_args[0] = arg0;
@@ -76,6 +83,26 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 	regs->syscall_args[5] = arg5;
 
 	ret = syscall_table[nr](regs);
+
+	if (ret <= -512 && ret >= -516)
+		pr_err("ERESTART-TRACE: raw restart code ret=%ld nr=%ld pid=%d\n",
+		       ret, nr, current->pid);
+
+	/*
+	 * Syscall restart contract for the export-based ABI: this port has no
+	 * rewritable guest instruction pointer, so -ERESTART* codes must never
+	 * leak to guest user space (they land in errno as 512/513/514/516 and
+	 * no guest libc or libuv retry loop recognizes them; Blink RESTARTABLE
+	 * restarts only on EINTR, which broke SIGCHLD-driven child reaping).
+	 * Translate to -EINTR, the user ABI form every guest retry loop
+	 * honors. The pending signal, if any, is delivered by the single
+	 * syscall_exit_to_user_mode() below; its guest handler runs after the
+	 * syscall result is already resolved. Known arch limitation: SA_RESTART
+	 * auto-restart is approximated by guest-side EINTR retries.
+	 */
+	if (ret == -ERESTARTSYS || ret == -ERESTARTNOINTR ||
+	    ret == -ERESTARTNOHAND || ret == -ERESTART_RESTARTBLOCK)
+		ret = -EINTR;
 
 	/*
 	 * Observe wait4 only after Linux has returned from the real syscall path.
@@ -88,6 +115,8 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 
 	syscall_exit_to_user_mode(regs);
 	regs->user_mode = 1;
+
+	atomic_dec(&__erestart_dbg_depth);
 
 	return ret;
 }

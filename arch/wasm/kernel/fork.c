@@ -45,6 +45,17 @@ SYSCALL_DEFINE6(clone, void *__user, fn, void *__user, fn_arg, unsigned long,
 	 * the parent's user state (no guest entry function). */
 	if (fn == NULL) {
 		int child;
+		/* POSIX-spawn vfork arrives as CLONE_VM|CLONE_VFORK|SIGCHLD.
+		 * This port cannot share a live user VAS across workers: each
+		 * worker owns a fresh WebAssembly.Memory and the fork bridge
+		 * snapshots the parent VAS (wasm_user_fork_user). Honoring
+		 * CLONE_VM would hand the child a fresh VAS while promising
+		 * shared VM; mask it. CLONE_VFORK stays: copy_process() arms
+		 * vfork_done so the spawner still blocks until the child
+		 * execs or exits, matching posix_spawn expectations. */
+		pr_err("G12-CLONE: fork-mode flags=%#lx pid=%d comm=%s\n",
+		       clone_flags, current->pid, current->comm);
+		kargs.flags &= ~(unsigned long)CLONE_VM;
 		kargs.fn = wasm_fork_continue;
 		kargs.fn_arg = NULL;
 		child = kernel_clone(&kargs);
