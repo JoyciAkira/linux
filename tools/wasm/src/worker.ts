@@ -1,3 +1,64 @@
+interface WorkerGlobalShim {
+  self: typeof globalThis;
+  postMessage?: (msg: unknown, transfer?: Transferable[]) => void;
+  onmessage?: ((event: { data: unknown }) => void) | null;
+  addEventListener?: (type: string, listener: unknown, options?: unknown) => void;
+  removeEventListener?: (type: string, listener: unknown, options?: unknown) => void;
+}
+const g = globalThis as unknown as WorkerGlobalShim;
+
+if (typeof g.self === "undefined") {
+  g.self = globalThis;
+}
+
+type NodeParentPortType = {
+  postMessage: (msg: unknown, transfer?: unknown) => void;
+  on: (evt: string, cb: (data: unknown) => void) => void;
+};
+
+const nodeParentPort: NodeParentPortType | undefined = (() => {
+  const gp = globalThis as Record<string, unknown>;
+  if (gp.parentPort && typeof gp.parentPort === "object") {
+    const pp = gp.parentPort as Record<string, unknown>;
+    if (typeof pp.postMessage === "function" && typeof pp.on === "function") {
+      return pp as NodeParentPortType;
+    }
+  }
+  if (typeof gp.process === "object" && gp.process !== null) {
+    const proc = gp.process as Record<string, unknown>;
+    if (typeof proc.getBuiltinModule === "function") {
+      const wt = (proc.getBuiltinModule as (name: string) => unknown)("node:worker_threads") as Record<string, unknown> | undefined;
+      if (wt && typeof wt === "object" && typeof wt.parentPort === "object" && wt.parentPort !== null) {
+        const pp = wt.parentPort as Record<string, unknown>;
+        if (typeof pp.postMessage === "function" && typeof pp.on === "function") {
+          return pp as NodeParentPortType;
+        }
+      }
+    }
+  }
+  return undefined;
+})();
+
+if (nodeParentPort && !g.postMessage) {
+  g.postMessage = (msg: unknown, transfer?: Transferable[]) =>
+    nodeParentPort.postMessage(msg, transfer);
+  nodeParentPort.on("message", (data: unknown) => {
+    if (typeof g.onmessage === "function") {
+      g.onmessage({ data });
+    }
+  });
+}
+if (typeof g.addEventListener === "undefined") {
+  g.addEventListener = ((type: string, listener: unknown) => {
+    if (type === "message" && typeof listener === "function") {
+      g.onmessage = listener as (event: { data: unknown }) => void;
+    }
+  }) as (type: string, listener: unknown, options?: unknown) => void;
+}
+if (typeof g.removeEventListener === "undefined") {
+  g.removeEventListener = (() => {}) as (type: string, listener: unknown, options?: unknown) => void;
+}
+
 import { assert } from "./util.ts";
 import {
   HALT_KERNEL,
@@ -7,6 +68,7 @@ import {
 } from "./wasm.ts";
 import { D1RingBuffer, type D1Record, type D1RingMetadata } from "./d1-ring-buffer.ts";
 import { wrapSyscall } from "./d1-syscall-wrapper.ts";
+import { BrokerClient, authorityPump } from "./kwa-broker.ts";
 
 export interface InitMessage {
   fn: number;
@@ -18,6 +80,8 @@ export interface InitMessage {
   parent_tls_base?: number;
   d1TraceEnabled?: boolean;
   d1RunId?: string;
+  brokerSab?: SharedArrayBuffer;
+  vmlinuxNoreplay?: WebAssembly.Module;
 }
 export type WorkerMessage =
   | {
@@ -33,6 +97,9 @@ export type WorkerMessage =
   | { type: "boot_console_close" }
   | { type: "run_on_main"; fn: number; arg: number }
   | { type: "worker_done"; reason: string }
+  | { type: "virtio_notify"; id: number; index: number }
+  | { type: "deliver_virtio_irq"; irq: number }
+  | { type: "init_worker_id"; id: number }
   | {
     type: "d1_trace_export";
     runId: string;
@@ -47,6 +114,8 @@ const unavailable = () => {
 const postMessage = self.postMessage as (message: WorkerMessage) => void;
 
 let workerDoneSent = false;
+let selfWorkerId = -1;
+let currentWorkerKernelInstance: Instance | null = null;
 function signalWorkerDone(reason: string): void {
   if (workerDoneSent) return;
   workerDoneSent = true;
@@ -70,6 +139,47 @@ export function exportD1Trace(): void {
   const metadata = d1TraceBuffer.getMetadata();
   postMessage({ type: "d1_trace_export", runId: d1RunId, records, metadata });
 }
+const ASM_GENERIC_NAMES: Record<number, string> = {
+  19: "eventfd2",
+  20: "epoll_create1",
+  21: "epoll_ctl",
+  22: "epoll_pwait",
+  25: "fcntl",
+  29: "ioctl",
+  56: "openat",
+  57: "close",
+  59: "pipe2",
+  62: "lseek",
+  63: "read",
+  64: "write",
+  66: "writev",
+  78: "readlinkat",
+  79: "newfstatat",
+  80: "fstat",
+  93: "exit",
+  94: "exit_group",
+  96: "set_tid_address",
+  98: "futex",
+  113: "clock_gettime",
+  114: "clock_getres",
+  115: "clock_nanosleep",
+  134: "rt_sigaction",
+  135: "rt_sigprocmask",
+  160: "uname",
+  214: "brk",
+  215: "munmap",
+  220: "clone",
+  222: "mmap",
+  226: "mprotect",
+  244: "set_thread_area",
+  245: "wasm_get_args",
+  260: "wait4",
+  261: "prlimit64",
+  422: "futex_waitv",
+  208: "setsockopt",
+  209: "getsockopt",
+};
+
 
 function user_imports({
   kernel_memory,
@@ -100,6 +210,7 @@ function user_imports({
     assert(instance);
     const { _start } = instance.exports;
     assert(typeof _start === "function", "_start not found");
+    console.log(`[LOADER:_start_begin] worker=${self.name || "?"}`);
     _start();
     throw new Error("_start reached the end without exiting");
   }
@@ -144,6 +255,12 @@ function user_imports({
       ): number => {
         const original_instance = instance;
         let ret: number;
+        if (nr === 245) {
+          // SYS_wasm_get_args: musl wasm32 crt1.o calls this to receive argc/argv/envp
+          if (typeof kernel_instance.exports.get_args === "function") {
+            return kernel_instance.exports.get_args(arg0);
+          }
+        }
         try {
           ret = kernel_instance.exports.syscall(
             nr,
@@ -174,6 +291,10 @@ function user_imports({
           call_entry = call_start;
           throw HALT_USER;
         }
+        const sname = ASM_GENERIC_NAMES[nr] || `nr_${nr}`;
+        if (nr === 19 || nr === 20 || nr === 21 || nr === 22 || nr === 98 || nr === 422 || (ret < 0 && ret !== -11 && ret !== -2 && ret !== -4 && ret !== -10)) {
+          console.log(`[SYSCALL] worker=${self.name || "?"} nr=${nr} (${sname}) a0=${arg0} a1=${arg1} a2=${arg2} ret=${ret} (errno=${ret < 0 ? -ret : 0})`);
+        }
         return ret;
       };
 
@@ -185,6 +306,7 @@ function user_imports({
         getThreadId: () => 0,
       });
 
+      console.log(`[LOADER:shared_memory_validated] worker=${self.name || "?"} bytes=${memory.buffer.byteLength}`);
       instance = new WebAssembly.Instance(module, {
         env: { memory },
         linux: {
@@ -193,9 +315,17 @@ function user_imports({
           get_args_length: kernel_instance.exports.get_args_length,
           get_args: kernel_instance.exports.get_args,
           arch_wasm_poll: kernel_instance.exports.arch_wasm_poll,
+          // __wasm_copy_siginfo(siginfo_t *info): sig=2 (i32) -> i32
+          // Populates siginfo_t struct in guest memory, returns 0 on success.
+          copy_siginfo: (info_ptr: number): number => {
+            if (memory && info_ptr) {
+              new Uint8Array(memory.buffer, info_ptr, 128).fill(0);
+            }
+            return 0;
+          },
         },
       });
-
+      console.log(`[LOADER:instantiate_success] worker=${self.name || "?"}`);
       if ("memory" in instance.exports) {
         assert(instance.exports.memory instanceof WebAssembly.Memory);
         memory = instance.exports.memory;
@@ -204,7 +334,7 @@ function user_imports({
         d1TraceBuffer.recordLifecycle("kernel_module_instantiated", d1RunId);
       }
     } catch (error) {
-      console.log("error instantiating user module:", String(error));
+      console.log(`[LOADER:instantiate_fail] worker=${self.name || "?"} error=${String(error)}`);
     }
   };
 
@@ -218,23 +348,33 @@ function user_imports({
     imports: {
       // program management:
       compile(buf, size) {
+        console.log(`[LOADER:compile_begin] worker=${self.name || "?"} size=${size}`);
         const bytes = new Uint8Array(
           kernel_memory_buffer.slice(buf, buf + size),
         );
         try {
           module = new WebAssembly.Module(bytes);
+          const expNames = WebAssembly.Module.exports(module).map(e => e.name).join(",");
+          console.log(`[LOADER:compile_module_ok] worker=${self.name || "?"} exports=${expNames}`);
+          console.log(`[LOADER:compile_end] worker=${self.name || "?"} ret=0`);
           return 0;
-        } catch {
+        } catch (err) {
+          console.log(`[LOADER:compile_fail] worker=${self.name || "?"} error=${String(err)}`);
           return -8; // exec format error
         }
       },
       instantiate(fresh_memory) {
+        console.log(`[LOADER:instantiate_begin] worker=${self.name || "?"} fresh_memory=${fresh_memory}`);
         if (!module && parent_module) module = parent_module;
         // M115 CLONE_VM threads: instantiation rewrites .data defaults over
         // the SHARED live memory, corrupting the parent's runtime globals.
-        // Snapshot/restore the .data window around it (blink links ≤2MB).
+        // Snapshot/restore the static region around it. Census (KWA-0,
+        // vmlinux.wat): kernel memory.init/fill covers [0, ~0x896000) — the
+        // old 2 MiB window (sized for blink) left [0x200000, 0x896000)
+        // unrestored, which clobbered the main Machine at 0x221030 with the
+        // child's get_args buffer. 16 MiB covers the full extent.
         const threadShared = !fresh_memory && parent_memory && memory === parent_memory;
-        const snap = threadShared && memory ? memory.buffer.slice(0, 2 * 1024 * 1024) : null;
+        const snap = threadShared && memory ? memory.buffer.slice(0, 16 * 1024 * 1024) : null;
         if (fresh_memory && memory) {
           // caller explicitly wants a fresh memory: recreate it
           const initial = 12288; // 768 MiB iniziali
@@ -340,8 +480,21 @@ function user_imports({
           f(arg);
           console.log("[CLONE] f returned");
 
-          // throw new Error("thread entrypoint reached the end without exiting");
-          console.warn("thread entrypoint reached the end without exiting");
+          // Guest thread entrypoints never return by contract: they end via
+          // exit_group/pthread_exit, which already freed this thread's Machine
+          // (blink SysExit -> FreeMachine). If control reaches here, this
+          // worker's stale continuation would re-enter on the freed Machine
+          // (use-after-free: syscalls dispatched on a recycled musl chunk,
+          // corrupting whichever allocation reused it). Fence the continuation:
+          // close the worker, then hard-throw so no further JS runs here.
+          try {
+            (self as unknown as DedicatedWorkerGlobalScope).close();
+          } catch {
+            /* close is best-effort */
+          }
+          throw new Error(
+            "[CLONE] thread entrypoint returned; worker fenced to prevent UAF",
+          );
         };
       },
       // G12/M115 fork-mode child: the kernel child task resumes the parent's
@@ -473,8 +626,16 @@ function user_imports({
 }
 
 self.onmessage = (event: MessageEvent<InitMessage>) => {
+  if ((event.data as any).type === "init_worker_id") {
+    selfWorkerId = (event.data as any).id;
+    return;
+  }
+  if ((event.data as any).type === "deliver_virtio_irq") {
+    for (let c = 0; c < 4; c++) currentWorkerKernelInstance?.exports.trigger_irq_for_cpu(c, (event.data as any).irq);
+    return;
+  }
   const { fn, arg, vmlinux, memory, parent_user_module, parent_user_memory,
-    parent_tls_base } = event.data;
+    parent_tls_base, brokerSab } = event.data;
 
   if (event.data.d1TraceEnabled === true) {
     d1TraceEnabled = true;
@@ -483,6 +644,88 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
     d1TraceBuffer.recordLifecycle("worker_start_message_received", d1RunId);
   }
 
+  // KWA: Secondary worker (CLONE / user process) with broker SAB:
+  if (brokerSab && parent_user_module !== null) {
+    const workerId =
+      parseInt((self.name || "").replace(/\D/g, ""), 10) ||
+      (Math.floor(Math.random() * 10000) + 1);
+    const client = new BrokerClient(brokerSab, workerId);
+    const kernelModule = event.data.vmlinuxNoreplay ?? vmlinux;
+    const brokerStub = {
+      syscall: (nr: number, a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, _a5 = 0) =>
+        client.syscall(nr, a0, a1, a2, a3, a4),
+      get_thread_area: () => client.syscall(133),
+      get_args_length: () => client.syscall(125),
+      get_args: (a0 = 0) => client.syscall(126, a0),
+      arch_wasm_poll: () => client.syscall(127),
+      fork_copied: (pid = 0) => client.syscall(141, pid),
+    };
+    const user = user_imports({
+      kernel_memory: memory,
+      get_kernel_instance: () => ({ exports: brokerStub } as unknown as Instance),
+      parent_user_module,
+      parent_user_memory,
+      parent_tls_base: parent_tls_base ?? 0,
+    });
+    const imports = {
+      env: { memory },
+      boot: {
+        get_devicetree: unavailable,
+        get_initramfs: unavailable,
+      },
+      user: user.imports,
+      kernel: kernel_imports({
+        is_worker: true,
+        memory,
+        broker_poll() {},
+        spawn_worker(fn2, arg2, name2, um2, umem2) {
+          postMessage({
+            type: "spawn_worker",
+            fn: fn2,
+            arg: arg2,
+            name: name2,
+            user_module: um2 ?? user.module,
+            user_memory: umem2 ?? user.memory,
+            parent_tls_base: 0,
+          });
+        },
+        boot_console_write(msg) {
+          postMessage({ type: "boot_console_write", message: msg });
+        },
+        boot_console_close() {
+          postMessage({ type: "boot_console_close" });
+        },
+        run_on_main(fn2, arg2) {
+          postMessage({ type: "run_on_main", fn: fn2, arg: arg2 });
+        },
+        get_user_module: () => user.module,
+        get_user_memory: () => user.memory,
+      }),
+      virtio: {
+        set_features: unavailable,
+        setup: unavailable,
+        enable_vring: unavailable,
+        disable_vring: unavailable,
+        notify: (id: number, index: number) => postMessage({ type: "virtio_notify", id, index, __workerIdx: selfWorkerId } as any),
+      },
+    } satisfies Imports;
+    const instance = new WebAssembly.Instance(kernelModule, imports) as Instance;
+    currentWorkerKernelInstance = instance;
+    try {
+      instance.exports.__indirect_function_table.get(fn)!(arg);
+      signalWorkerDone("entrypoint_returned");
+    } catch (error) {
+      if (error === HALT_KERNEL) {
+        signalWorkerDone("halt_kernel");
+        return;
+      }
+      signalWorkerDone("uncaught_" + ((error as Error)?.name ?? "error"));
+      throw error;
+    }
+    return;
+  }
+
+  // Boot worker (authoritative kernel owner):
   const user = user_imports({
     kernel_memory: memory,
     get_kernel_instance: () => instance,
@@ -501,11 +744,16 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
     kernel: kernel_imports({
       is_worker: true,
       memory,
+      broker_poll() {
+        if (brokerSab && instance) {
+          authorityPump(
+            (nr, a0, a1, a2, a3, a4, a5) =>
+              instance.exports.syscall(nr, a0, a1, a2, a3, a4, a5),
+            brokerSab,
+          );
+        }
+      },
       spawn_worker(fn, arg, name, user_module, user_memory) {
-        // The kernel import carries no module/memory (always null). Attach
-        // THIS worker's current guest module + memory: for fork(0) the caller
-        // is the parent, so the child receives the real references. Module is
-        // structured-cloneable; memory is shared:true → same buffer handle.
         const tlsBase = (() => {
           try {
             const g = (instance.exports as Record<string, any>).__tls_base;
@@ -545,11 +793,12 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
       setup: unavailable,
       enable_vring: unavailable,
       disable_vring: unavailable,
-      notify: unavailable,
+      notify: (id: number, index: number) => postMessage({ type: "virtio_notify", id, index, __workerIdx: selfWorkerId } as any),
     },
   } satisfies Imports;
 
   const instance = new WebAssembly.Instance(vmlinux, imports) as Instance;
+  currentWorkerKernelInstance = instance;
   try {
     instance.exports.__indirect_function_table.get(fn)!(arg);
     signalWorkerDone("entrypoint_returned");

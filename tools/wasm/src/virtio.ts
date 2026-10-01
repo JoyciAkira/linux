@@ -142,6 +142,10 @@ class Virtqueue {
     return chain;
   }
 
+  pop(): Chain | null {
+    return this.#pop();
+  }
+
   *[Symbol.iterator]() {
     let chain;
     while ((chain = this.#pop())) yield chain;
@@ -666,6 +670,7 @@ export class BlockDevice extends VirtioDevice<BlockDeviceConfig> {
 }
 
 export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
+  onInputDelivered?: () => void;
   ID = 3;
   config_bytes = new Uint8Array(0);
   config = new EmptyStruct(this.config_bytes);
@@ -681,9 +686,9 @@ export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
     this.#output = output.getWriter();
   }
 
+
   #writing: Promise<void> | null = null;
   async #writer(queue: Virtqueue) {
-    const queue_iter = queue[Symbol.iterator]();
     const reader = this.#input.getReader();
     for (;;) {
       const { value, done } = await reader.read();
@@ -691,7 +696,13 @@ export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
       let chunk = value;
 
       while (chunk.length > 0) {
-        const chain = queue_iter.next().value;
+        let chain = queue.pop();
+        if (!chain) {
+          for (let wait = 0; wait < 50 && !chain; wait++) {
+            await new Promise((r) => setTimeout(r, 10));
+            chain = queue.pop();
+          }
+        }
         if (!chain) {
           console.warn("no more descriptors, dropping console input");
           break;
@@ -705,8 +716,9 @@ export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
         desc.array.set(chunk.subarray(0, n));
         chunk = chunk.subarray(n);
         chain.release(n);
+        if (this.onInputDelivered) this.onInputDelivered();
+        this.trigger_interrupt("vring");
       }
-      this.trigger_interrupt("vring");
     }
   }
 
@@ -718,8 +730,9 @@ export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
       case 0:
         this.#writing ??= this.#writer(queue);
         break;
-      case 1:
-        for (const chain of queue) {
+      case 1: {
+        let chain;
+        while ((chain = queue.pop())) {
           let n = 0;
           for (const { array, writable } of chain) {
             assert(!writable, "transmitter must be readable");
@@ -730,6 +743,7 @@ export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
         }
         this.trigger_interrupt("vring");
         break;
+      }
       default:
         console.error("ConsoleDevice: unknown vq", vq);
     }

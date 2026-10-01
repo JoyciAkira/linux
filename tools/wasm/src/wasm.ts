@@ -60,6 +60,7 @@ export interface Imports {
       comm: number,
       comm_len: number,
     ): void;
+    broker_poll(): void;
   };
   user: {
     compile(buf: number, size: number): number;
@@ -109,6 +110,7 @@ export function kernel_imports(
     get_user_module,
     get_user_memory,
     process_event_handler,
+    broker_poll,
   }: {
     is_worker: boolean;
     memory: WebAssembly.Memory;
@@ -137,6 +139,7 @@ export function kernel_imports(
       data1: bigint,
       comm: string,
     ) => void;
+    broker_poll?: () => void;
   },
 ): Imports["kernel"] {
   const mem = new Uint8Array(memory.buffer);
@@ -147,7 +150,7 @@ export function kernel_imports(
     },
     halt_worker: () => {
       if (!is_worker) throw new Error("Halt called in main thread");
-      self.close();
+      (globalThis.close ?? (() => {}))();
       throw HALT_KERNEL;
     },
 
@@ -260,5 +263,6 @@ export function kernel_imports(
         );
       }
     },
+    broker_poll: broker_poll ?? (() => {}),
   };
 }

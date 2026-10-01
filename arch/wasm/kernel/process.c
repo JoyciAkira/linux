@@ -190,8 +190,10 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 
 	name_len = snprintf(name, ARRAY_SIZE(name), "%s (%d)", p->comm, p->pid);
 
-	/* SR0.10: Emit CLONE_WORKER_REQUESTED before spawning worker */
-	{
+	/* SR0.10: Emit CLONE_WORKER_REQUESTED before spawning worker.
+	 * Fail-closed: pid 0 (swapper/idle) is not a process; non RUN_START/RUN_END
+	 * events must carry a non-zero pid per the host process-event schema. */
+	if (p->pid != 0) {
 		u64 run_id_hi, run_id_lo;
 		zn_get_run_id(&run_id_hi, &run_id_lo);
 		wasm_kernel_process_event(

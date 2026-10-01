@@ -31,6 +31,11 @@ void arch_do_signal_or_restart(struct pt_regs *regs) {
 		}
 
 		wasm_user_call_signal_handler((uintptr_t)sa->sa_handler, ksig.sig);
+		pr_err("ERESTART-TRACE: handler returned sig=%d pid=%d comm=%s\n",
+		       ksig.sig, current->pid, current->comm);
+	} else if (regs->syscall_nr >= 0) {
+		pr_err("ERESTART-TRACE: signal consumed w/o handler sig=%d nr=%ld pid=%d\n",
+		       ksig.sig, regs->syscall_nr, current->pid);
 	}
 }
 

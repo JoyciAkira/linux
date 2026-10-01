@@ -8,6 +8,7 @@
 #include <linux/irqchip.h>
 #include <linux/irqdomain.h>
 #include <linux/processor.h>
+#include <asm/wasm_imports.h>
 
 static DEFINE_PER_CPU(unsigned long, irqflags);
 static DEFINE_PER_CPU(atomic64_t, irq_pending);
@@ -32,7 +33,7 @@ void __cpuidle arch_cpu_idle(void)
 	int ret;
 
 	if (deadline == 0) {
-		timeout_ns = -1; // forever
+		timeout_ns = 10 * 1000 * 1000; /* 10ms cap: broker poll runs periodically */
 	} else {
 		now = wasm_kernel_get_now_nsec();
 		if ((s64)(deadline - now) <= 0) {
@@ -42,10 +43,15 @@ void __cpuidle arch_cpu_idle(void)
 			return;
 		}
 		timeout_ns = deadline - now;
+		if (timeout_ns > 10 * 1000 * 1000)
+			timeout_ns = 10 * 1000 * 1000;
 	}
+
+	wasm_kernel_broker_poll();
 
 	ret = __builtin_wasm_memory_atomic_wait64(&pending->counter, 0,
 						  timeout_ns);
+
 
 	if (ret == 2 /* timeout reached */) {
 		__this_cpu_write(timer_deadline_ns, 0);

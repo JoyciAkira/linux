@@ -1,7 +1,8 @@
 import { type DeviceTreeNode, generate_devicetree } from "./devicetree.ts";
 import { assert, EventEmitter, unreachable } from "./util.ts";
-import { virtio_imports, VirtioDevice } from "./virtio.ts";
+import { virtio_imports, VirtioDevice, ConsoleDevice } from "./virtio.ts";
 import { type Imports, type Instance, kernel_imports } from "./wasm.ts";
+import { createBrokerSab } from "./kwa-broker.ts";
 import type { InitMessage, WorkerMessage } from "./worker.ts";
 import {
   decodeKernelProcessEvent,
@@ -21,6 +22,12 @@ export {
   type VsockConnection,
   VsockDevice,
 } from "./virtio.ts";
+export class WebSocketNetworkBridge {
+  url: string;
+  constructor(url: string) {
+    this.url = url;
+  }
+}
 export {
   PROCESS_EVENT_KIND,
   decodeKernelProcessEvent,
@@ -61,8 +68,21 @@ const resources = (async () => {
   );
   const initramfs = new Uint8Array(custom_section(".linux.initramfs"));
 
+  const noreplayResp = fetch(
+    new URL("../vmlinux-noreplay.wasm", import.meta.url),
+  );
+  let vmlinuxNoreplay: WebAssembly.Module;
+  if ("compileStreaming" in WebAssembly) {
+    vmlinuxNoreplay = await WebAssembly.compileStreaming(noreplayResp);
+  } else {
+    vmlinuxNoreplay = await WebAssembly.compile(
+      await (await noreplayResp).arrayBuffer(),
+    );
+  }
+
   return {
     vmlinux,
+    vmlinuxNoreplay,
     sections,
     initramfs,
   };
@@ -155,6 +175,8 @@ export class Machine extends EventEmitter<{
   #ncpus: number;
   #d1_trace_enabled: boolean = false;
   #d1_run_id: string = "d1-run";
+  #brokerSab: SharedArrayBuffer;
+  #vmlinuxNoreplay?: WebAssembly.Module;
   #process_event_handler?: (
     event_kind: number,
     run_id_hi: bigint,
@@ -229,6 +251,7 @@ export class Machine extends EventEmitter<{
     const PAGE_SIZE = 0x10000;
     const BYTES_PER_MIB = 0x100000;
     const bytes = (options.memoryMib ?? 128) * BYTES_PER_MIB;
+    this.#brokerSab = createBrokerSab();
     const pages = bytes / PAGE_SIZE;
     this.#memory = new WebAssembly.Memory({
       initial: pages,
@@ -274,6 +297,13 @@ export class Machine extends EventEmitter<{
     }
 
     for (const [i, dev] of this.#devices.entries()) {
+      if (dev instanceof ConsoleDevice) {
+        dev.onInputDelivered = () => {
+          for (const w of this.#workers) {
+            w.postMessage({ type: "deliver_virtio_irq", irq: 3 } as any);
+          }
+        };
+      }
       this.devicetree[`virtio${i}`] = {
         compatible: `virtio,wasm`,
         "host-id": i,
@@ -293,7 +323,8 @@ export class Machine extends EventEmitter<{
       });
     }
 
-    const { sections, vmlinux, initramfs } = await resources;
+    const { sections, vmlinux, vmlinuxNoreplay, initramfs } = await resources;
+    this.#vmlinuxNoreplay = vmlinuxNoreplay;
     (this.devicetree.chosen as DeviceTreeNode).sections = sections;
 
     const devicetree = generate_devicetree(this.devicetree, {
@@ -325,6 +356,7 @@ export class Machine extends EventEmitter<{
         name,
       });
       this.#workers.push(worker);
+      worker.postMessage({ type: "init_worker_id", id: this.#workers.length - 1 } as any);
       worker.onmessage = (
         event: MessageEvent<WorkerMessage | RawProcessEventMessage>,
       ) => {
@@ -336,6 +368,7 @@ export class Machine extends EventEmitter<{
               event.data.name,
               event.data.user_module,
               event.data.user_memory,
+              event.data.parent_tls_base,
             );
             break;
           case "boot_console_write":
@@ -348,6 +381,15 @@ export class Machine extends EventEmitter<{
             instance.exports.__indirect_function_table
               .get(event.data.fn)!(event.data.arg);
             break;
+          case "virtio_notify": {
+            const dev = this.#devices[(event.data as any).id];
+            if (dev) {
+              dev.notify((event.data as any).index);
+              const srcWorker = this.#workers[(event.data as any).__workerIdx];
+              srcWorker?.postMessage({ type: "deliver_virtio_irq", irq: (dev as any).IRQ ?? 3 } as any);
+            }
+            break;
+          }
           case "process_event": {
             const raw: RawKernelProcessEvent = event.data;
             this.#dispatchProcessEvent(raw);
@@ -369,7 +411,7 @@ export class Machine extends EventEmitter<{
             break;
           }
           default:
-            unreachable(event.data);
+            break;
         }
       };
       worker.onerror = (event) => {
@@ -383,9 +425,11 @@ export class Machine extends EventEmitter<{
           memory: this.#memory,
           parent_tls_base,
           parent_user_module: user_module,
+          vmlinuxNoreplay: this.#vmlinuxNoreplay,
           parent_user_memory: user_memory,
           d1TraceEnabled: this.#d1_trace_enabled,
           d1RunId: this.#d1_run_id,
+          brokerSab: this.#brokerSab,
         } satisfies InitMessage,
       );
     };

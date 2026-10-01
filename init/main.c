@@ -1421,11 +1421,20 @@ static void __init do_initcalls(void)
 	size_t len = strlen(saved_command_line) + 1;
 	char *command_line;
 
+	BUILD_BUG_ON(ARRAY_SIZE(initcall_levels_start) !=
+		     ARRAY_SIZE(initcall_level_names));
+	BUILD_BUG_ON(ARRAY_SIZE(initcall_levels_end) !=
+		     ARRAY_SIZE(initcall_level_names));
+	BUILD_BUG_ON(ARRAY_SIZE(initcall_levels_sync_start) !=
+		     ARRAY_SIZE(initcall_level_names));
+	BUILD_BUG_ON(ARRAY_SIZE(initcall_levels_sync_end) !=
+		     ARRAY_SIZE(initcall_level_names));
+
 	command_line = kzalloc(len, GFP_KERNEL);
 	if (!command_line)
 		panic("%s: Failed to allocate %zu bytes\n", __func__, len);
 
-	for (level = 0; level < ARRAY_SIZE(initcall_level_names) - 1; level++) {
+	for (level = 0; level < ARRAY_SIZE(initcall_level_names); level++) {
 		/* Parser modifies command_line, restore it each time */
 		strcpy(command_line, saved_command_line);
 		do_initcall_level(level, command_line);
