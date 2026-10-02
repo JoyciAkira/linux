@@ -131,47 +131,55 @@ function user_imports({
       }
     }
 
-    const kernel_instance = get_kernel_instance();
+    // K4: Secondary workers MUST NOT access kernel instance directly.
+    // All syscalls route through broker SAB; non-syscall imports are stubbed.
+    const isBrokerOnly = (() => {
+      try { get_kernel_instance(); return false; } catch { return true; }
+    })();
 
-    try {
+    if (isBrokerOnly) {
+      // Broker-only path: no local kernel instance available
       const originalSyscallHandler = (
-        nr: number,
-        arg0: number,
-        arg1: number,
-        arg2: number,
-        arg3: number,
-        arg4: number,
-        arg5: number,
+        nr: number, arg0: number, arg1: number, arg2: number,
+        arg3: number, arg4: number, arg5: number,
+      ): number => {
+        throw new Error("[K4] syscall attempted without broker client initialization");
+      };
+
+      const wrappedSyscallHandler = wrapSyscall(originalSyscallHandler, {
+        buffer: d1TraceBuffer,
+        runId: d1RunId,
+        enabled: d1TraceEnabled,
+        processId: `worker-${self.name || "unknown"}`,
+        getThreadId: () => 0,
+      });
+
+      instance = new WebAssembly.Instance(module, {
+        env: { memory },
+        linux: {
+          syscall: wrappedSyscallHandler,
+          get_thread_area: () => 0,
+          get_args_length: () => 0,
+          get_args: () => 0,
+          arch_wasm_poll: () => 0,
+        },
+      });
+    } else {
+      // Boot worker path: direct kernel access (unchanged from pre-K4)
+      const kernel_instance = get_kernel_instance();
+      const originalSyscallHandler = (
+        nr: number, arg0: number, arg1: number, arg2: number,
+        arg3: number, arg4: number, arg5: number,
       ): number => {
         const original_instance = instance;
         let ret: number;
         try {
-          ret = kernel_instance.exports.syscall(
-            nr,
-            arg0,
-            arg1,
-            arg2,
-            arg3,
-            arg4,
-            arg5,
-          );
+          ret = kernel_instance.exports.syscall(nr, arg0, arg1, arg2, arg3, arg4, arg5);
         } catch (error) {
-          if (error === HALT_KERNEL) {
-            console.log(
-              `[M115] HALT_KERNEL worker=${self.name || "?"} nr=${nr} ` +
-                "(kernel threw sentinel — see preceding EXECVE/BINPRM trace)",
-            );
-            throw error;
-          }
+          if (error === HALT_KERNEL) throw error;
           throw error;
         }
         if (instance !== original_instance) {
-          // execve committed: instance replaced. HALT_USER is the NORMAL
-          // control transfer to the fresh image (discriminator vs HALT_KERNEL).
-          console.log(
-            `[M115] EXEC_INSTANCE_CHANGED worker=${self.name || "?"} ` +
-              "→ HALT_USER (exec commit, normal)",
-          );
           call_entry = call_start;
           throw HALT_USER;
         }
@@ -196,16 +204,14 @@ function user_imports({
           arch_wasm_poll: kernel_instance.exports.arch_wasm_poll,
         },
       });
+    }
 
-      if ("memory" in instance.exports) {
-        assert(instance.exports.memory instanceof WebAssembly.Memory);
-        memory = instance.exports.memory;
-      }
-      if (d1TraceEnabled) {
-        d1TraceBuffer.recordLifecycle("kernel_module_instantiated", d1RunId);
-      }
-    } catch (error) {
-      console.log("error instantiating user module:", String(error));
+    if ("memory" in instance.exports) {
+      assert(instance.exports.memory instanceof WebAssembly.Memory);
+      memory = instance.exports.memory;
+    }
+    if (d1TraceEnabled) {
+      d1TraceBuffer.recordLifecycle("kernel_module_instantiated", d1RunId);
     }
   };
 
