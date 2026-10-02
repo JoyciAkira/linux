@@ -53,6 +53,28 @@ static void wasm_emit_wait4_reap_event(long ret, unsigned long stat_addr)
 	);
 }
 
+static volatile long kwa_last_entry_nr;
+static volatile unsigned long kwa_last_entry_a5;
+static volatile unsigned int kwa_entry_count;
+
+__attribute__((export_name("kwa_get_last_entry_nr"))) long
+wasm_kwa_get_last_entry_nr(void)
+{
+	return kwa_last_entry_nr;
+}
+
+__attribute__((export_name("kwa_get_last_entry_a5"))) unsigned long
+wasm_kwa_get_last_entry_a5(void)
+{
+	return kwa_last_entry_a5;
+}
+
+__attribute__((export_name("kwa_get_entry_count"))) unsigned int
+wasm_kwa_get_entry_count(void)
+{
+	return kwa_entry_count;
+}
+
 __attribute__((export_name("syscall"))) long
 wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 	     unsigned long arg2, unsigned long arg3, unsigned long arg4,
@@ -60,6 +82,15 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 {
 	struct pt_regs *regs = current_pt_regs();
 	long ret;
+
+	/*
+	 * KWA K1 witness: capture the complete broker ABI at the real Linux
+	 * syscall entry, before Linux normalizes or dispatches the request.
+	 * Getters below are diagnostic-only and do not participate in dispatch.
+	 */
+	kwa_last_entry_nr = nr;
+	kwa_last_entry_a5 = arg5;
+	kwa_entry_count++;
 
 	regs->user_mode = 0;
 	nr = syscall_enter_from_user_mode(regs, nr);
