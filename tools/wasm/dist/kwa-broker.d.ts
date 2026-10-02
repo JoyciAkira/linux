@@ -25,7 +25,7 @@ export declare const STATE: {
     readonly CONSUMED: 4;
 };
 export declare const N_SLOTS = 64;
-export declare const SLOT_SIZE = 96;
+export declare const SLOT_SIZE = 112;
 export declare const SLOTS_OFF = 64;
 export declare const OFF: {
     readonly MAGIC: 0;
@@ -57,6 +57,9 @@ export declare const S: {
     readonly ERRNO: 60;
     readonly GENERATION: 64;
     readonly OWNER: 68;
+    readonly KERNEL_PID: 72;
+    readonly KERNEL_TGID: 76;
+    readonly KERNEL_GENERATION: 80;
 };
 export declare const idx: (slot: number, off: number) => number;
 export declare function assertBrokerLayout(): void;
@@ -64,6 +67,9 @@ export declare function createBrokerSab(): SharedArrayBuffer;
 export interface BrokerResponse {
     result: number;
     errno: number;
+    kernelPid?: number;
+    kernelTgid?: number;
+    kernelGeneration?: number;
 }
 export declare class BrokerClient {
     #private;
@@ -71,4 +77,8 @@ export declare class BrokerClient {
     syscall(nr: number, a0?: number, a1?: number, a2?: number, a3?: number, a4?: number, a5?: number, taskId?: number, tid?: number): number;
     invoke(nr: number, a0?: number, a1?: number, a2?: number, a3?: number, a4?: number, a5?: number, taskId?: number, tid?: number): BrokerResponse;
 }
-export declare function authorityPump(syscallFn: (nr: number, a0: number, a1: number, a2: number, a3: number, a4: number, a5: number) => number, sab: SharedArrayBuffer): number;
+export declare function authorityPump(syscallFn: (nr: number, a0: number, a1: number, a2: number, a3: number, a4: number, a5: number) => number, sab: SharedArrayBuffer, kernelIdentity?: {
+    getPid: () => number;
+    getTgid: () => number;
+    getGeneration: () => number;
+}): number;

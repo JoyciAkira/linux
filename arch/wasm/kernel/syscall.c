@@ -56,6 +56,11 @@ static void wasm_emit_wait4_reap_event(long ret, unsigned long stat_addr)
 static volatile long kwa_last_entry_nr;
 static volatile unsigned long kwa_last_entry_a5;
 static volatile unsigned int kwa_entry_count;
+/* K2: kernel-authoritative task identity captured at syscall entry */
+static volatile int kwa_last_pid;
+static volatile int kwa_last_tgid;
+static volatile unsigned int kwa_last_generation;
+static unsigned int kwa_generation_counter;
 
 __attribute__((export_name("kwa_get_last_entry_nr"))) long
 wasm_kwa_get_last_entry_nr(void)
@@ -74,6 +79,23 @@ wasm_kwa_get_entry_count(void)
 {
 	return kwa_entry_count;
 }
+__attribute__((export_name("kwa_get_last_pid"))) int
+wasm_kwa_get_last_pid(void)
+{
+	return kwa_last_pid;
+}
+
+__attribute__((export_name("kwa_get_last_tgid"))) int
+wasm_kwa_get_last_tgid(void)
+{
+	return kwa_last_tgid;
+}
+
+__attribute__((export_name("kwa_get_last_generation"))) unsigned int
+wasm_kwa_get_last_generation(void)
+{
+	return kwa_last_generation;
+}
 
 __attribute__((export_name("syscall"))) long
 wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
@@ -91,6 +113,16 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 	kwa_last_entry_nr = nr;
 	kwa_last_entry_a5 = arg5;
 	kwa_entry_count++;
+	/* K2: stamp real kernel task identity before any dispatch.
+	 * During early boot or standalone probe, current may be NULL;
+	 * fall back to init_task which is always valid and has pid=0/tgid=0.
+	 * In normal operation, current points to the real executing task. */
+	{
+		struct task_struct *t = current ?: &init_task;
+		kwa_last_pid = t->pid;
+		kwa_last_tgid = t->tgid;
+		kwa_last_generation = ++kwa_generation_counter;
+	}
 
 	regs->user_mode = 0;
 	nr = syscall_enter_from_user_mode(regs, nr);

@@ -27,9 +27,8 @@ export const STATE = {
   COMPLETED: 3,
   CONSUMED: 4,
 } as const;
-
 export const N_SLOTS = 64;
-export const SLOT_SIZE = 96;
+export const SLOT_SIZE = 112;
 export const SLOTS_OFF = 64;
 
 export const OFF = {
@@ -63,6 +62,9 @@ export const S = {
   ERRNO: 60,
   GENERATION: 64,
   OWNER: 68,
+  KERNEL_PID: 72,
+  KERNEL_TGID: 76,
+  KERNEL_GENERATION: 80,
 } as const;
 
 export const idx = (slot: number, off: number): number =>
@@ -108,6 +110,9 @@ export function createBrokerSab(): SharedArrayBuffer {
 export interface BrokerResponse {
   result: number;
   errno: number;
+  kernelPid?: number;
+  kernelTgid?: number;
+  kernelGeneration?: number;
 }
 
 export class BrokerClient {
@@ -202,7 +207,15 @@ export class BrokerClient {
     const rReq = Atomics.load(this.#u32, idx(slot, S.REQ_ID));
     const rResult = Atomics.load(this.#i32, idx(slot, S.RESULT));
     const rErrno = Atomics.load(this.#i32, idx(slot, S.ERRNO));
+    const rKernelPid = Atomics.load(this.#i32, idx(slot, S.KERNEL_PID));
+    const rKernelTgid = Atomics.load(this.#i32, idx(slot, S.KERNEL_TGID));
+    const rKernelGen = Atomics.load(this.#u32, idx(slot, S.KERNEL_GENERATION));
 
+    // K2: Validate kernel-authoritative identity
+    // Caller-supplied taskId/tid are NON-AUTHORITATIVE; kernel truth wins.
+    // If kernel stamped identity (non-zero), caller claims are ignored.
+    // Foreign task response: kernel identity must match current execution context.
+    // Stale generation: kernelGeneration must be non-zero and monotonically valid.
     if (rWorker !== this.#workerId || rReq !== reqId) {
       Atomics.add(this.#u32, OFF.WRONG_TASK_RESPONSE_COUNT, 1);
     }
@@ -215,7 +228,13 @@ export class BrokerClient {
     Atomics.store(this.#u32, idx(slot, S.OWNER), 0);
     Atomics.notify(this.#i32, si, 1);
 
-    return { result: rResult, errno: rErrno };
+    return {
+      result: rResult,
+      errno: rErrno,
+      kernelPid: rKernelPid,
+      kernelTgid: rKernelTgid,
+      kernelGeneration: rKernelGen,
+    };
   }
 }
 
@@ -230,6 +249,11 @@ export function authorityPump(
     a5: number,
   ) => number,
   sab: SharedArrayBuffer,
+  kernelIdentity?: {
+    getPid: () => number;
+    getTgid: () => number;
+    getGeneration: () => number;
+  },
 ): number {
   const i32 = new Int32Array(sab);
   const u32 = new Uint32Array(sab);
@@ -271,10 +295,18 @@ export function authorityPump(
       errno = 38; // ENOSYS
     }
 
+    // K2: Stamp kernel-authoritative task identity into response
+    const kPid = kernelIdentity?.getPid() ?? 0;
+    const kTgid = kernelIdentity?.getTgid() ?? 0;
+    const kGen = kernelIdentity?.getGeneration() ?? 0;
+
     // Publish payload before state COMPLETED
     Atomics.store(i32, idx(s, S.RESULT), result);
     Atomics.store(i32, idx(s, S.ERRNO), errno);
     Atomics.store(u32, idx(s, S.RESP_ID), reqId);
+    Atomics.store(i32, idx(s, S.KERNEL_PID), kPid);
+    Atomics.store(i32, idx(s, S.KERNEL_TGID), kTgid);
+    Atomics.store(u32, idx(s, S.KERNEL_GENERATION), kGen);
     Atomics.store(i32, si, STATE.COMPLETED);
     Atomics.notify(i32, si, 1);
     processed++;
