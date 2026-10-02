@@ -9,7 +9,7 @@ import {
   type RawKernelProcessEvent,
   type RawProcessEventMessage,
 } from "./process-events.ts";
-
+import { authorityPump, createBrokerSab } from "./kwa-broker.ts";
 export {
   BlockDevice,
   type BlockDeviceStorage,
@@ -227,8 +227,8 @@ export class Machine extends EventEmitter<{
     this.#process_event_handler = options.processEventHandler;
     this.#d1_trace_enabled = options.d1TraceEnabled === true;
     this.#d1_run_id = options.d1RunId ?? "d1-run";
-    // K4: Create shared broker SAB for secondary worker syscall routing
-    this.#brokerSab = new SharedArrayBuffer(4096);
+    // K4R: Use canonical broker SAB layout (7232 bytes) instead of hardcoded 4096
+    this.#brokerSab = createBrokerSab();
     const PAGE_SIZE = 0x10000;
     const BYTES_PER_MIB = 0x100000;
     const bytes = (options.memoryMib ?? 128) * BYTES_PER_MIB;
@@ -369,6 +369,24 @@ export class Machine extends EventEmitter<{
             worker.onmessage = null;
             worker.onerror = null;
             worker.terminate();
+            break;
+          }
+          case "broker_kick": {
+            // K4R: Production authority pump triggered by secondary worker
+            const exports = instance.exports as Record<string, unknown>;
+            const getTgid = typeof exports.kwa_get_last_tgid === "function"
+              ? () => (exports.kwa_get_last_tgid as () => number)()
+              : () => 0;
+            authorityPump(
+              (nr, a0, a1, a2, a3, a4, a5) =>
+                instance.exports.syscall(nr, a0, a1, a2, a3, a4, a5),
+              this.#brokerSab,
+              {
+                getPid: () => (exports.kwa_get_last_pid as () => number)(),
+                getTgid,
+                getGeneration: () => (exports.kwa_get_last_generation as () => number)(),
+              },
+            );
             break;
           }
           default:

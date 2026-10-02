@@ -38,6 +38,7 @@ export type WorkerMessage =
   | { type: "boot_console_write"; message: ArrayBuffer }
   | { type: "boot_console_close" }
   | { type: "run_on_main"; fn: number; arg: number }
+  | { type: "broker_kick" }
   | { type: "worker_done"; reason: string }
   | {
     type: "d1_trace_export";
@@ -158,7 +159,9 @@ function user_imports({
         nr: number, arg0: number, arg1: number, arg2: number,
         arg3: number, arg4: number, arg5: number,
       ): number => {
-        return brokerClient.syscall(nr, arg0, arg1, arg2, arg3, arg4, arg5);
+        return brokerClient.invoke(nr, arg0, arg1, arg2, arg3, arg4, arg5, 0, 0, () => {
+          postMessage({ type: "broker_kick" });
+        }).result;
       };
 
       const wrappedSyscallHandler = wrapSyscall(originalSyscallHandler, {

@@ -153,6 +153,7 @@ export class BrokerClient {
     a5 = 0,
     taskId = 0,
     tid = 0,
+    notifyAuthority?: () => void,
   ): BrokerResponse {
     const reqId = this.#reqSeq++;
     let slot = -1;
@@ -192,6 +193,9 @@ export class BrokerClient {
     Atomics.store(this.#i32, si, STATE.REQUESTED);
     Atomics.add(this.#i32, OFF.DOORBELL, 1);
 
+    // K4R: Notify authority that a request is ready (broker_kick protocol)
+    // This triggers production authorityPump on main thread via postMessage
+    if (notifyAuthority) notifyAuthority();
     // 3. Wait for COMPLETED with matching RESP_ID
     for (;;) {
       const st = Atomics.load(this.#i32, si);
