@@ -120,6 +120,7 @@ export class BrokerClient {
   readonly #u32: Uint32Array;
   readonly #workerId: number;
   #reqSeq = 1;
+  #slotGen = new Uint32Array(N_SLOTS);
 
   constructor(sab: SharedArrayBuffer, workerId: number) {
     this.#i32 = new Int32Array(sab);
@@ -185,7 +186,8 @@ export class BrokerClient {
     Atomics.store(this.#i32, idx(slot, S.A4), a4 | 0);
     Atomics.store(this.#i32, idx(slot, S.A5), a5 | 0);
     Atomics.store(this.#u32, idx(slot, S.NR), nr);
-    Atomics.store(this.#u32, idx(slot, S.GENERATION), 1);
+    const slotGen = ++this.#slotGen[slot]!;
+    Atomics.store(this.#u32, idx(slot, S.GENERATION), slotGen);
 
     Atomics.store(this.#i32, si, STATE.REQUESTED);
     Atomics.add(this.#i32, OFF.DOORBELL, 1);
@@ -216,8 +218,23 @@ export class BrokerClient {
     // If kernel stamped identity (non-zero), caller claims are ignored.
     // Foreign task response: kernel identity must match current execution context.
     // Stale generation: kernelGeneration must be non-zero and monotonically valid.
+    // K2R: Fail-closed enforcement — reject contaminated responses
     if (rWorker !== this.#workerId || rReq !== reqId) {
       Atomics.add(this.#u32, OFF.WRONG_TASK_RESPONSE_COUNT, 1);
+      // Clean up slot without returning contaminated data
+      Atomics.store(this.#i32, si, STATE.FREE);
+      Atomics.store(this.#u32, idx(slot, S.OWNER), 0);
+      Atomics.notify(this.#i32, si, 1);
+      return { result: -1, errno: 38, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
+    }
+    // K2R: Fail-closed generation check — stale or zero generation is rejected
+    const expectedGen = this.#slotGen[slot];
+    if (rKernelGen === 0 || rKernelGen !== expectedGen) {
+      Atomics.add(this.#u32, OFF.STALE_TASK_REQUEST_COUNT, 1);
+      Atomics.store(this.#i32, si, STATE.FREE);
+      Atomics.store(this.#u32, idx(slot, S.OWNER), 0);
+      Atomics.notify(this.#i32, si, 1);
+      return { result: -1, errno: 38, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
     }
 
     // 4. Consume and FREE
