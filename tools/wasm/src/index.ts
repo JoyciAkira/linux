@@ -155,6 +155,8 @@ export class Machine extends EventEmitter<{
   #ncpus: number;
   #d1_trace_enabled: boolean = false;
   #d1_run_id: string = "d1-run";
+  #brokerSab: SharedArrayBuffer;
+  #nextWorkerId: number = 1;
   #process_event_handler?: (
     event_kind: number,
     run_id_hi: bigint,
@@ -225,7 +227,8 @@ export class Machine extends EventEmitter<{
     this.#process_event_handler = options.processEventHandler;
     this.#d1_trace_enabled = options.d1TraceEnabled === true;
     this.#d1_run_id = options.d1RunId ?? "d1-run";
-
+    // K4: Create shared broker SAB for secondary worker syscall routing
+    this.#brokerSab = new SharedArrayBuffer(4096);
     const PAGE_SIZE = 0x10000;
     const BYTES_PER_MIB = 0x100000;
     const bytes = (options.memoryMib ?? 128) * BYTES_PER_MIB;
@@ -384,6 +387,9 @@ export class Machine extends EventEmitter<{
           parent_tls_base,
           parent_user_module: user_module,
           parent_user_memory: user_memory,
+          // K4: deliver broker SAB and worker ID for secondary worker syscall routing
+          brokerSab: this.#brokerSab,
+          workerId: this.#nextWorkerId++,
           d1TraceEnabled: this.#d1_trace_enabled,
           d1RunId: this.#d1_run_id,
         } satisfies InitMessage,

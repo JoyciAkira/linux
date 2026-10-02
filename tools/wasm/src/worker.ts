@@ -7,6 +7,7 @@ import {
 } from "./wasm.ts";
 import { D1RingBuffer, type D1Record, type D1RingMetadata } from "./d1-ring-buffer.ts";
 import { wrapSyscall } from "./d1-syscall-wrapper.ts";
+import { BrokerClient } from "./kwa-broker.ts";
 
 export interface InitMessage {
   fn: number;
@@ -17,6 +18,8 @@ export interface InitMessage {
   parent_user_module: WebAssembly.Module | null;
   parent_user_memory: WebAssembly.Memory | null;
   parent_tls_base?: number;
+  brokerSab?: SharedArrayBuffer;
+  workerId?: number;
   d1TraceEnabled?: boolean;
   d1RunId?: string;
 }
@@ -29,6 +32,8 @@ export type WorkerMessage =
     user_module: WebAssembly.Module | null;
     user_memory: WebAssembly.Memory | null;
     parent_tls_base?: number;
+    brokerSab?: SharedArrayBuffer;
+    workerId?: number;
   }
   | { type: "boot_console_write"; message: ArrayBuffer }
   | { type: "boot_console_close" }
@@ -78,12 +83,16 @@ function user_imports({
   parent_user_module: parent_module,
   parent_user_memory: parent_memory,
   parent_tls_base,
+  brokerSab,
+  workerId,
 }: {
   kernel_memory: WebAssembly.Memory;
   get_kernel_instance: () => Instance;
   parent_tls_base: number;
   parent_user_module: WebAssembly.Module | null;
   parent_user_memory: WebAssembly.Memory | null;
+  brokerSab?: SharedArrayBuffer;
+  workerId?: number;
 }): {
   module: WebAssembly.Module | null;
   memory: WebAssembly.Memory | null;
@@ -138,12 +147,18 @@ function user_imports({
     })();
 
     if (isBrokerOnly) {
-      // Broker-only path: no local kernel instance available
+      // Broker-only path: route syscalls through shared SAB to single kernel authority
+      // brokerSab and workerId must be available from InitMessage (set in onmessage scope)
+      if (typeof brokerSab === "undefined" || typeof workerId === "undefined") {
+        throw new Error("[K4] secondary worker missing brokerSab or workerId in InitMessage");
+      }
+      const brokerClient = new BrokerClient(brokerSab, workerId);
+
       const originalSyscallHandler = (
         nr: number, arg0: number, arg1: number, arg2: number,
         arg3: number, arg4: number, arg5: number,
       ): number => {
-        throw new Error("[K4] syscall attempted without broker client initialization");
+        return brokerClient.syscall(nr, arg0, arg1, arg2, arg3, arg4, arg5);
       };
 
       const wrappedSyscallHandler = wrapSyscall(originalSyscallHandler, {
@@ -481,7 +496,7 @@ function user_imports({
 
 self.onmessage = (event: MessageEvent<InitMessage>) => {
   const { fn, arg, memory, parent_user_module, parent_user_memory,
-    parent_tls_base } = event.data;
+    parent_tls_base, brokerSab, workerId } = event.data;
 
   if (event.data.d1TraceEnabled === true) {
     d1TraceEnabled = true;
@@ -505,6 +520,8 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
     parent_user_module,
     parent_user_memory,
     parent_tls_base: parent_tls_base ?? 0,
+    brokerSab,
+    workerId,
   });
 
   const imports = {
