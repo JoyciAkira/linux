@@ -483,11 +483,87 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
     d1TraceBuffer.recordLifecycle("trace_initialized", d1RunId);
     d1TraceBuffer.recordLifecycle("worker_start_message_received", d1RunId);
   }
-  // K3: Secondary workers MUST NOT instantiate vmlinux or access kernel instance.
-  // Kernel authority is sole boot instance; workers route via broker SAB.
-  // user_imports() removed — it required get_kernel_instance() which returned
-  // the local vmlinux instance that no longer exists in secondary workers.
-  throw new Error("[K3] secondary worker received InitMessage but vmlinux instantiation is forbidden");
+  // K3/K4: Secondary workers MUST NOT instantiate vmlinux.
+  // Instantiate ONLY the user module; route all syscalls through broker SAB.
+  if (!parent_user_module || !parent_user_memory) {
+    throw new Error("[K4] secondary worker missing user module/memory");
+  }
+
+  // BrokerClient will be initialized lazily on first syscall via wrappedSyscallHandler.
+  // For now we set up the user module imports with broker-routed syscall.
+  const user = user_imports({
+    kernel_memory: memory,
+    get_kernel_instance: () => {
+      throw new Error("[K3] direct kernel instance access forbidden in secondary worker");
+    },
+    parent_user_module,
+    parent_user_memory,
+    parent_tls_base: parent_tls_base ?? 0,
+  });
+
+  const imports = {
+    env: { memory },
+    boot: {
+      get_devicetree: unavailable,
+      get_initramfs: unavailable,
+    },
+    user: user.imports,
+    kernel: kernel_imports({
+      is_worker: true,
+      memory,
+      spawn_worker(fn, arg, name, user_module, user_memory) {
+        postMessage({
+          type: "spawn_worker",
+          fn,
+          arg,
+          name,
+          user_module: user_module ?? user.module,
+          user_memory: user_memory ?? user.memory,
+          parent_tls_base: 0, // TLS not available without local kernel instance
+        });
+      },
+      boot_console_write(message) {
+        postMessage({ type: "boot_console_write", message });
+      },
+      boot_console_close() {
+        postMessage({ type: "boot_console_close" });
+      },
+      run_on_main(fn, arg) {
+        postMessage({ type: "run_on_main", fn, arg });
+      },
+      get_user_module() {
+        return user.module;
+      },
+      get_user_memory() {
+        return user.memory;
+      },
+    }),
+    virtio: {
+      set_features: unavailable,
+      setup: unavailable,
+      enable_vring: unavailable,
+      disable_vring: unavailable,
+      notify: unavailable,
+    },
+  } satisfies Imports;
+
+  // Instantiate USER module only — NO vmlinux
+  const userInstance = new WebAssembly.Instance(parent_user_module, imports);
+  try {
+    const table = (userInstance.exports as Record<string, unknown>).__indirect_function_table;
+    if (table instanceof WebAssembly.Table) {
+      const entry = table.get(fn);
+      if (typeof entry === "function") entry(arg);
+    }
+    signalWorkerDone("entrypoint_returned");
+  } catch (error) {
+    if (error === HALT_KERNEL) {
+      signalWorkerDone("halt_kernel");
+      return;
+    }
+    signalWorkerDone("uncaught_" + ((error as Error)?.name ?? "error"));
+    throw error;
+  }
 };
 
 self.addEventListener("error", (event: ErrorEvent) => {
