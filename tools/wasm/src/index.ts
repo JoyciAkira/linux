@@ -379,7 +379,7 @@ export class Machine extends EventEmitter<{
         {
           fn,
           arg,
-          vmlinux,
+          // K3: vmlinux removed — secondary workers MUST NOT receive kernel module
           memory: this.#memory,
           parent_tls_base,
           parent_user_module: user_module,
