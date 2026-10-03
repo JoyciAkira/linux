@@ -107,7 +107,7 @@ export class BrokerClient {
         const resp = this.invoke(nr, a0, a1, a2, a3, a4, a5, taskId, tid);
         return resp.result;
     }
-    invoke(nr, a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, taskId = 0, tid = 0) {
+    invoke(nr, a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, taskId = 0, tid = 0, notifyAuthority) {
         const reqId = this.#reqSeq++;
         let slot = -1;
         // 1. Reserve slot via OWNER CAS (reserve without publishing REQUESTED)
@@ -139,6 +139,10 @@ export class BrokerClient {
         Atomics.store(this.#u32, idx(slot, S.GENERATION), slotGen);
         Atomics.store(this.#i32, si, STATE.REQUESTED);
         Atomics.add(this.#i32, OFF.DOORBELL, 1);
+        // K4R: Notify authority that a request is ready (broker_kick protocol)
+        // This triggers production authorityPump on main thread via postMessage
+        if (notifyAuthority)
+            notifyAuthority();
         // 3. Wait for COMPLETED with matching RESP_ID
         for (;;) {
             const st = Atomics.load(this.#i32, si);

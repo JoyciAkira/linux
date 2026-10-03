@@ -47,6 +47,34 @@ export type WorkerMessage =
     metadata: D1RingMetadata;
   };
 
+// K4 DIAGNOSTIC: structured stage markers for failure localization
+type K4DiagStage =
+ | "INIT_RECEIVED"
+ | "MEMORY_IDENTITY"
+ | "BEFORE_USER_IMPORTS"
+ | "AFTER_USER_IMPORTS"
+ | "USER_IMPORTS_FAILED"
+ | "BEFORE_KERNEL_IMPORTS"
+ | "AFTER_KERNEL_IMPORTS"
+ | "KERNEL_IMPORTS_FAILED"
+ | "MODULE_IMPORTS"
+ | "BEFORE_IMPORT_OBJECT"
+ | "AFTER_IMPORT_OBJECT"
+ | "BEFORE_USER_INSTANTIATE"
+ | "AFTER_USER_INSTANTIATE"
+ | "USER_INSTANTIATE_FAILED"
+ | "BEFORE_ENTRYPOINT"
+ | "ENTRYPOINT_FOUND"
+ | "BEFORE_ENTRYPOINT_CALL"
+ | "BEFORE_LINUX_SYSCALL"
+ | "AFTER_LINUX_SYSCALL"
+ | "TOP_LEVEL_FATAL";
+
+function postK4Diag(stage: K4DiagStage, detail?: Record<string, unknown>): void {
+ try {
+ postMessage({ type: "k4_diag", stage, detail } as unknown as WorkerMessage);
+ } catch { /* best-effort diagnostic */ }
+}
 const unavailable = () => {
   throw new Error("not available on worker thread");
 };
@@ -498,98 +526,157 @@ function user_imports({
 }
 
 self.onmessage = (event: MessageEvent<InitMessage>) => {
-  const { fn, arg, memory, parent_user_module, parent_user_memory,
-    parent_tls_base, brokerSab, workerId } = event.data;
+ const { fn, arg, memory, parent_user_module, parent_user_memory,
+ parent_tls_base, brokerSab, workerId } = event.data;
 
-  if (event.data.d1TraceEnabled === true) {
-    d1TraceEnabled = true;
-    d1RunId = event.data.d1RunId ?? "d1-run";
-    d1TraceBuffer.recordLifecycle("trace_initialized", d1RunId);
-    d1TraceBuffer.recordLifecycle("worker_start_message_received", d1RunId);
-  }
-  // K3/K4: Secondary workers MUST NOT instantiate vmlinux.
-  // Instantiate ONLY the user module; route all syscalls through broker SAB.
-  if (!parent_user_module || !parent_user_memory) {
-    throw new Error("[K4] secondary worker missing user module/memory");
-  }
+ // K4 DIAG: outer synchronous exception boundary
+ let currentStage: K4DiagStage = "INIT_RECEIVED";
+ try {
 
-  // BrokerClient will be initialized lazily on first syscall via wrappedSyscallHandler.
-  // For now we set up the user module imports with broker-routed syscall.
-  const user = user_imports({
-    kernel_memory: memory,
-    get_kernel_instance: () => {
-      throw new Error("[K3] direct kernel instance access forbidden in secondary worker");
-    },
-    parent_user_module,
-    parent_user_memory,
-    parent_tls_base: parent_tls_base ?? 0,
-    brokerSab,
-    workerId,
-  });
+ postK4Diag("INIT_RECEIVED", { fn, arg, workerId, hasBrokerSab: !!brokerSab, hasParentModule: !!parent_user_module, hasParentMemory: !!parent_user_memory });
 
-  const imports = {
-    env: { memory },
-    boot: {
-      get_devicetree: unavailable,
-      get_initramfs: unavailable,
-    },
-    user: user.imports,
-    kernel: kernel_imports({
-      is_worker: true,
-      memory,
-      spawn_worker(fn, arg, name, user_module, user_memory) {
-        postMessage({
-          type: "spawn_worker",
-          fn,
-          arg,
-          name,
-          user_module: user_module ?? user.module,
-          user_memory: user_memory ?? user.memory,
-          parent_tls_base: 0, // TLS not available without local kernel instance
-        });
-      },
-      boot_console_write(message) {
-        postMessage({ type: "boot_console_write", message });
-      },
-      boot_console_close() {
-        postMessage({ type: "boot_console_close" });
-      },
-      run_on_main(fn, arg) {
-        postMessage({ type: "run_on_main", fn, arg });
-      },
-      get_user_module() {
-        return user.module;
-      },
-      get_user_memory() {
-        return user.memory;
-      },
-    }),
-    virtio: {
-      set_features: unavailable,
-      setup: unavailable,
-      enable_vring: unavailable,
-      disable_vring: unavailable,
-      notify: unavailable,
-    },
-  } satisfies Imports;
+ if (event.data.d1TraceEnabled === true) {
+ d1TraceEnabled = true;
+ d1RunId = event.data.d1RunId ?? "d1-run";
+ d1TraceBuffer.recordLifecycle("trace_initialized", d1RunId);
+ d1TraceBuffer.recordLifecycle("worker_start_message_received", d1RunId);
+ }
+ // K3/K4: Secondary workers MUST NOT instantiate vmlinux.
+ // Instantiate ONLY the user module; route all syscalls through broker SAB.
+ if (!parent_user_module || !parent_user_memory) {
+ throw new Error("[K4] secondary worker missing user module/memory");
+ }
 
-  // Instantiate USER module only — NO vmlinux
-  const userInstance = new WebAssembly.Instance(parent_user_module, imports);
-  try {
-    const table = (userInstance.exports as Record<string, unknown>).__indirect_function_table;
-    if (table instanceof WebAssembly.Table) {
-      const entry = table.get(fn);
-      if (typeof entry === "function") entry(arg);
-    }
-    signalWorkerDone("entrypoint_returned");
-  } catch (error) {
-    if (error === HALT_KERNEL) {
-      signalWorkerDone("halt_kernel");
-      return;
-    }
-    signalWorkerDone("uncaught_" + ((error as Error)?.name ?? "error"));
-    throw error;
-  }
+ // K4 DIAG: Memory identity verification before user_imports
+ currentStage = "MEMORY_IDENTITY";
+ postK4Diag("MEMORY_IDENTITY", {
+ memory_instanceof: memory instanceof WebAssembly.Memory,
+ parent_user_memory_instanceof: parent_user_memory instanceof WebAssembly.Memory,
+ memory_identity: memory === parent_user_memory,
+ memory_byteLength: memory?.buffer?.byteLength,
+ parent_memory_byteLength: parent_user_memory?.buffer?.byteLength,
+ brokerSab_instanceof: brokerSab instanceof SharedArrayBuffer,
+ brokerSab_byteLength: brokerSab?.byteLength,
+ workerId,
+ });
+
+ // BrokerClient will be initialized lazily on first syscall via wrappedSyscallHandler.
+ // For now we set up the user module imports with broker-routed syscall.
+ currentStage = "BEFORE_USER_IMPORTS";
+ postK4Diag("BEFORE_USER_IMPORTS");
+ const user = user_imports({
+ kernel_memory: memory,
+ get_kernel_instance: () => {
+ throw new Error("[K3] direct kernel instance access forbidden in secondary worker");
+ },
+ parent_user_module,
+ parent_user_memory,
+ parent_tls_base: parent_tls_base ?? 0,
+ brokerSab,
+ workerId,
+ });
+ currentStage = "AFTER_USER_IMPORTS";
+ postK4Diag("AFTER_USER_IMPORTS", { hasUserImports: !!user.imports, hasModule: !!user.module, hasMemory: !!user.memory });
+
+ // K4 DIAG: Capture user module import contract
+ currentStage = "MODULE_IMPORTS";
+ const moduleImports = WebAssembly.Module.imports(parent_user_module);
+ postK4Diag("MODULE_IMPORTS", {
+ importCount: moduleImports.length,
+ imports: moduleImports.map(i => ({ module: i.module, name: i.name, kind: i.kind })),
+ });
+
+ currentStage = "BEFORE_KERNEL_IMPORTS";
+ postK4Diag("BEFORE_KERNEL_IMPORTS");
+ const imports = {
+ env: { memory },
+ boot: {
+ get_devicetree: unavailable,
+ get_initramfs: unavailable,
+ },
+ user: user.imports,
+ kernel: kernel_imports({
+ is_worker: true,
+ memory,
+ spawn_worker(fn, arg, name, user_module, user_memory) {
+ postMessage({
+ type: "spawn_worker",
+ fn,
+ arg,
+ name,
+ user_module: user_module ?? user.module,
+ user_memory: user_memory ?? user.memory,
+ parent_tls_base: 0, // TLS not available without local kernel instance
+ });
+ },
+ boot_console_write(message) {
+ postMessage({ type: "boot_console_write", message });
+ },
+ boot_console_close() {
+ postMessage({ type: "boot_console_close" });
+ },
+ run_on_main(fn, arg) {
+ postMessage({ type: "run_on_main", fn, arg });
+ },
+ get_user_module() {
+ return user.module;
+ },
+ get_user_memory() {
+ return user.memory;
+ },
+ }),
+ virtio: {
+ set_features: unavailable,
+ setup: unavailable,
+ enable_vring: unavailable,
+ disable_vring: unavailable,
+ notify: unavailable,
+ },
+ } satisfies Imports;
+ currentStage = "AFTER_KERNEL_IMPORTS";
+ postK4Diag("AFTER_KERNEL_IMPORTS");
+
+ // Instantiate USER module only — NO vmlinux
+ currentStage = "BEFORE_USER_INSTANTIATE";
+ postK4Diag("BEFORE_USER_INSTANTIATE", { importKeys: Object.keys(imports), userImportKeys: Object.keys(imports.user ?? {}) });
+ const userInstance = new WebAssembly.Instance(parent_user_module, imports);
+ currentStage = "AFTER_USER_INSTANTIATE";
+ postK4Diag("AFTER_USER_INSTANTIATE", { exportNames: Object.keys(userInstance.exports) });
+ try {
+ currentStage = "BEFORE_ENTRYPOINT";
+ const table = (userInstance.exports as Record<string, unknown>).__indirect_function_table;
+ if (table instanceof WebAssembly.Table) {
+ const entry = table.get(fn);
+ currentStage = "ENTRYPOINT_FOUND";
+ postK4Diag("ENTRYPOINT_FOUND", { fn, entryType: typeof entry, entryLength: (entry as Function)?.length });
+ if (typeof entry === "function") {
+ currentStage = "BEFORE_ENTRYPOINT_CALL";
+ postK4Diag("BEFORE_ENTRYPOINT_CALL", { fn, arg });
+ entry(arg);
+ }
+ }
+ signalWorkerDone("entrypoint_returned");
+ } catch (error) {
+ if (error === HALT_KERNEL) {
+ signalWorkerDone("halt_kernel");
+ return;
+ }
+ signalWorkerDone("uncaught_" + ((error as Error)?.name ?? "error"));
+ throw error;
+ }
+
+ } catch (fatalError) {
+ // K4 DIAG: TOP_LEVEL_FATAL — report before rethrowing
+ postK4Diag("TOP_LEVEL_FATAL", {
+ stage: currentStage,
+ errorName: (fatalError as Error)?.name,
+ errorMessage: String((fatalError as Error)?.message ?? fatalError),
+ errorStack: (fatalError as Error)?.stack,
+ workerId,
+ fn,
+ });
+ throw fatalError;
+ }
 };
 
 self.addEventListener("error", (event: ErrorEvent) => {
