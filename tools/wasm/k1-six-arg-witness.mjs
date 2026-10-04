@@ -31,7 +31,7 @@ import {
 } from "./dist/kwa-broker.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const VMLINUX_PATH = join(__dirname, "vmlinux.wasm");
+const VMLINUX_PATH = process.argv[2] ?? join(__dirname, "vmlinux.wasm");
 
 // Minimal kernel imports — only what vmlinux.wasm requires to instantiate.
 // Most are no-ops; the syscall path is what we're testing.
@@ -56,6 +56,9 @@ function makeImports(memory) {
       spawn_worker: () => {},
       run_on_main: () => {},
       process_event: () => {},
+      yield: () => { throw new Error("K1 standalone witness cannot run the scheduler"); },
+      finish_task: () => { throw new Error("K1 standalone witness cannot terminate scheduled tasks"); },
+      syscall_complete: () => { throw new Error("K1 standalone witness must use the naked syscall entry"); },
       broker_poll: () => {},
     },
     user: {

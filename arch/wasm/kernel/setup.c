@@ -1,4 +1,5 @@
 #include <asm/bug.h>
+#include <asm/globals.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
 #include <asm/sysmem.h>
@@ -20,11 +21,15 @@ void __init init_sections(unsigned long node);
 char *__initramfs_start;
 unsigned long __initramfs_size;
 
-static void do_start_kernel(void *unused)
+static int do_start_kernel(void *unused)
 {
 	set_current_cpu(0);
 	set_current_task(&init_task);
 	start_kernel();
+	/* start_kernel is __noreturn (ends in the cpu0 idle loop); the int
+	 * signature exists so the registry's call_indirect type matches
+	 * exactly — wasm indirect calls trap on signature mismatch. */
+	return 0;
 }
 
 __attribute__((export_name("boot"))) void __init _start(void)
@@ -32,6 +37,10 @@ __attribute__((export_name("boot"))) void __init _start(void)
 	static char devicetree[2048];
 	static char initramfs[512];
 	int node;
+
+	/* K5: capture the pristine root stack top before anything mutates the
+	 * stack global; the boot continuation re-adopts it in kwa_task_entry. */
+	kwa_boot_stack_capture();
 
 	set_current_cpu(0);
 	set_current_task(&init_task);
@@ -57,7 +66,13 @@ __attribute__((export_name("boot"))) void __init _start(void)
 	set_current_cpu(-2); // -1 is reserved for unscheduled tasks
 	set_current_task(NULL);
 
-	wasm_kernel_spawn_worker(do_start_kernel, NULL, "boot", sizeof "boot" - 1, false);
+	/* K5: the boot continuation is started by the host from the kernel
+	 * registry (wire token 0) once this export returns — start_kernel then
+	 * runs as the preserved kernel root stack. Bound to &init_task so the
+	 * idle's opaque self/next token resolves to this same slot. */
+	kwa_boot_register(&init_task, do_start_kernel);
+	wasm_kernel_spawn_worker(do_start_kernel, NULL, "boot",
+				 sizeof "boot" - 1, false, 0);
 }
 
 void __init setup_arch(char **cmdline_p)

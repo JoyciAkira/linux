@@ -1,6 +1,7 @@
 /.wrangler
 /dist
 /npm-package
+/node_modules
 /vmlinux.wasm
 *.tgz
 artifacts/

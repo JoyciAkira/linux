@@ -37,10 +37,16 @@ static void noinline_for_stack secondary_entry_inner(struct task_struct *idle)
 	BUG(); // should never get here
 }
 
-static void secondary_entry(void *idle)
+static int secondary_entry(void *idle)
 {
-	set_stack_pointer(task_pt_regs(((struct task_struct *)idle)) - 1);
+	set_stack_pointer((void *)ALIGN_DOWN(
+		(unsigned long)task_pt_regs((struct task_struct *)idle),
+		KWA_STACK_ALIGN));
 	secondary_entry_inner(idle);
+	/* secondary_entry_inner ends in cpu_startup_entry (__noreturn); the
+	 * int signature exists so the registry's call_indirect type matches
+	 * exactly — wasm indirect calls trap on signature mismatch. */
+	return 0;
 }
 
 int __cpu_up(unsigned int cpu, struct task_struct *idle)
@@ -48,7 +54,12 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
 	char name[8];
 	int name_len = snprintf(name, ARRAY_SIZE(name), "entry%d", cpu);
 	task_thread_info(idle)->cpu = cpu;
-	wasm_kernel_spawn_worker(secondary_entry, idle, name, name_len, false);
+	/* Autostart: no scheduler handoff assigns a cpu to a secondary idle,
+	 * so the host starts this continuation immediately (bit1 of the
+	 * share_user_memory wire param). */
+	kwa_task_register(idle, secondary_entry, idle, KWA_SF_AUTOSTART);
+	wasm_kernel_spawn_worker(secondary_entry, idle, name, name_len,
+				 KWA_SF_AUTOSTART, kwa_task_token(idle));
 	wait_for_completion(&cpu_starting);
 	return 0;
 }

@@ -40,7 +40,7 @@ struct thread_struct {};
 	{           \
 	}
 
-#define task_pt_regs(task) ((struct pt_regs *)(task->stack + THREAD_SIZE) - 1)
+#define task_pt_regs(task) ((struct pt_regs *)((task)->stack + THREAD_SIZE) - 1)
 
 #define TASK_SIZE U32_MAX
 

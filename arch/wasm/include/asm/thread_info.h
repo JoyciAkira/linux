@@ -25,7 +25,21 @@ struct thread_info {
 	atomic_t running_cpu; // negative means unscheduled
 	unsigned long tp_value;
 	struct wasm_process_args *args;
+	/* K5 context ownership: k5_park_floor is the lowest C stack point parked
+	 * by any continuation of this task; new syscall continuations start
+	 * strictly below it so a parked lifecycle/exec frame is never clobbered.
+	 * k5_flags carries the exec-commit marker (no Linux return for execve)
+	 * and the post-wait marker (successful wait4-reap followed by a
+	 * matching ECHILD wait, awaiting the certifying post-wait getpid).
+	 * k5_reaped_child holds the pid consumed by that successful wait4. */
+	unsigned long k5_park_floor;
+	u32 k5_flags;
+	int k5_reaped_child;
 };
+
+/* K5 flags */
+#define K5_KF_EXEC_COMMITTED 0x1 /* new user image committed this task */
+#define K5_KF_POSTWAIT_PENDING 0x2 /* reap+ECHILD seen, awaiting post-wait getpid */
 
 #define INIT_THREAD_INFO(tsk)                        \
 	{                                            \
@@ -35,6 +49,9 @@ struct thread_info {
 		.running_cpu = ATOMIC_INIT(0),       \
 		.tp_value = U32_MAX,                 \
 		.args = NULL,                        \
+		.k5_park_floor = 0,                  \
+		.k5_flags = 0,                       \
+		.k5_reaped_child = 0,                \
 	}
 
 #define TIF_SYSCALL_TRACE 0 /* syscall trace active */

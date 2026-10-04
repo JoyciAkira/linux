@@ -6,6 +6,18 @@ export const PROCESS_EVENT_KIND = {
   USER_SIGNAL_HANDLER_DISPATCH: 5,
   WAIT_REAP_COMMITTED: 6,
   RUN_END: 7,
+  /** K5: kernel_clone committed — real child task registered (KernelContext). */
+  CLONE_COMMITTED: 8,
+  /** K5: released task removed from kernel task table (release_task). */
+  TASK_RELEASE_COMMITTED: 9,
+  /** K5: parent entered wait4 syscall (post-wait observability). */
+  PARENT_POST_WAIT_SYSCALL: 10,
+  /** K5: C context suspension proof. data0=stack pointer, data1=cookie. */
+  CONTEXT_SUSPEND: 11,
+  /** K5: C context resume/rebind proof. data0=stack pointer, data1=cookie. */
+  CONTEXT_RESUME: 12,
+  // KernelContext: event 13 (DO_EXIT) intentionally absent — ZN_EVENT_TASK_DEAD
+  // (4) already carries exit_code for terminal transitions.
 } as const;
 
 export type KernelProcessEventKind =
@@ -41,6 +53,9 @@ export interface KernelProcessEvent extends RawKernelProcessEvent {
   runId: string;
   sequence: bigint;
   terminalStatus?: KernelTerminalStatus;
+  /** CONTEXT_SUSPEND/CONTEXT_RESUME only: C stack pointer + cookie proof —
+   * real volatile values read from C, never host-derived. */
+  contextProof?: { sp: bigint; cookie: bigint };
 }
 
 const EVENT_NAMES: Readonly<Record<number, KernelProcessEventName | undefined>> = {
@@ -52,6 +67,11 @@ const EVENT_NAMES: Readonly<Record<number, KernelProcessEventName | undefined>> 
     "USER_SIGNAL_HANDLER_DISPATCH",
   [PROCESS_EVENT_KIND.WAIT_REAP_COMMITTED]: "WAIT_REAP_COMMITTED",
   [PROCESS_EVENT_KIND.RUN_END]: "RUN_END",
+  [PROCESS_EVENT_KIND.CLONE_COMMITTED]: "CLONE_COMMITTED",
+  [PROCESS_EVENT_KIND.TASK_RELEASE_COMMITTED]: "TASK_RELEASE_COMMITTED",
+  [PROCESS_EVENT_KIND.PARENT_POST_WAIT_SYSCALL]: "PARENT_POST_WAIT_SYSCALL",
+  [PROCESS_EVENT_KIND.CONTEXT_SUSPEND]: "CONTEXT_SUSPEND",
+  [PROCESS_EVENT_KIND.CONTEXT_RESUME]: "CONTEXT_RESUME",
 };
 
 function assertUint32(name: string, value: number): void {
@@ -124,6 +144,13 @@ export function decodeKernelProcessEvent(
 
   if (raw.event_kind === PROCESS_EVENT_KIND.WAIT_REAP_COMMITTED) {
     event.terminalStatus = decodeLinuxWaitStatus(raw.data0);
+  }
+
+  if (
+    raw.event_kind === PROCESS_EVENT_KIND.CONTEXT_SUSPEND ||
+    raw.event_kind === PROCESS_EVENT_KIND.CONTEXT_RESUME
+  ) {
+    event.contextProof = { sp: raw.data0, cookie: raw.data1 };
   }
 
   return event;

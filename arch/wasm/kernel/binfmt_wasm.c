@@ -182,7 +182,12 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 		);
 	}
 
+	/* K5: mark the point of no return. The brokered execve request gets NO
+	 * syscall_complete — kwa_syscall_for_task sees this flag after the
+	 * syscall "returns" and wraps the task into the newly committed user
+	 * image instead; the original slot is cancelled by finish_task. */
 	wasm_user_instantiate(true);
+	current_thread_info()->k5_flags |= K5_KF_EXEC_COMMITTED;
 
 	return 0;
 err:

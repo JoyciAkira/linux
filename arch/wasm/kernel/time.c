@@ -6,6 +6,7 @@
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
+#include <asm/globals.h>
 #include <asm/irq.h>
 #include <asm/wasm_imports.h>
 #include <asm/param.h>
@@ -24,9 +25,12 @@ void calibrate_delay(void)
 
 void __delay(unsigned long cycles)
 {
-	static int zero = 0;
-	int ret = __builtin_wasm_memory_atomic_wait32(&zero, 0, cycles);
-	BUG_ON(ret != 2); // 2 means timeout
+	// K5: bounded self-resume yield; the authority event loop resumes this
+	// same continuation after the deadline expires.
+	struct kwa_exec_ctx ctx;
+	kwa_context_suspend(&ctx, KWA_YIELD_DELAY,
+			    wasm_kernel_get_now_nsec() + cycles,
+			    kwa_task_token(get_current_task()));
 }
 
 void __udelay(unsigned long usecs)

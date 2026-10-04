@@ -1,15 +1,19 @@
 import { type DeviceTreeNode, generate_devicetree } from "./devicetree.ts";
 import { assert, EventEmitter, unreachable } from "./util.ts";
 import { virtio_imports, VirtioDevice } from "./virtio.ts";
-import { type Imports, type Instance, kernel_imports } from "./wasm.ts";
-import type { InitMessage, WorkerMessage } from "./worker.ts";
+import type { Imports } from "./wasm.ts";
+import type {
+  AuthorityDiagMessage,
+  InitMessage,
+  WorkerMessage,
+} from "./worker.ts";
 import {
   decodeKernelProcessEvent,
   type KernelProcessEvent,
   type RawKernelProcessEvent,
   type RawProcessEventMessage,
 } from "./process-events.ts";
-import { authorityPump, createBrokerSab, serviceBrokerKick } from "./kwa-broker.ts";
+import { createBrokerSab } from "./kwa-broker.ts";
 export {
   BlockDevice,
   type BlockDeviceStorage,
@@ -27,6 +31,16 @@ export {
   decodeLinuxWaitStatus,
   formatRunId,
 } from "./process-events.ts";
+export type { AuthorityDiagMessage } from "./worker.ts";
+export type { VirtioOp } from "./worker.ts";
+
+/** K4 diagnostic stage markers surfaced from secondary workers — observed
+ * data, never an unreachable-main error. */
+export interface K4DiagMessage {
+  type: "k4_diag";
+  stage: string;
+  detail?: Record<string, unknown>;
+}
 export type {
   KernelProcessEvent,
   KernelProcessEventKind,
@@ -145,6 +159,8 @@ export class Machine extends EventEmitter<{
   error: ErrorEvent;
   d1_trace: D1TraceExport;
   process_event: KernelProcessEvent;
+  authority_diag: AuthorityDiagMessage;
+  k4_diag: K4DiagMessage;
 }> {
   #boot_console: TransformStream<Uint8Array, Uint8Array>;
   #boot_console_writer: WritableStreamDefaultWriter<Uint8Array>;
@@ -156,7 +172,10 @@ export class Machine extends EventEmitter<{
   #d1_trace_enabled: boolean = false;
   #d1_run_id: string = "d1-run";
   #brokerSab: SharedArrayBuffer;
-  #nextWorkerId: number = 1;
+  /** Main-assigned transport ids only for legacy secondary spawns; authority
+   * ids live in 1..n (authority itself = 1, user workers from 2), so legacy
+   * ids start at 1M to keep the spaces disjoint. */
+  #nextWorkerId: number = 1_000_000;
   #process_event_handler?: (
     event_kind: number,
     run_id_hi: bigint,
@@ -312,22 +331,13 @@ export class Machine extends EventEmitter<{
       this.#boot_console_writer.close();
     };
 
-    const spawn_worker = (
-      fn: number,
-      arg: number,
-      name: string,
-      user_module: WebAssembly.Module | null,
-      user_memory: WebAssembly.Memory | null,
-      parent_tls_base = 0,
-    ) => {
-      console.log(
-        `[SPW] fn=${fn} name=${name} umodule=${typeof user_module}:${String(user_module).slice(0, 40)} umem=${typeof user_memory}:${String(user_memory)}`,
-      );
-      const worker = new Worker(new URL("./worker.js", import.meta.url), {
-        type: "module",
-        name,
-      });
-      this.#workers.push(worker);
+    let authorityWorker: Worker | null = null;
+    // Main-side device binding: devices live here; the kernel (authority
+    // worker) reaches them through virtio_cmd/virtio_result round-trips and
+    // receives IRQs back through authority_irq.
+    let vimports: Imports["virtio"] | null = null;
+
+    const wireWorker = (worker: Worker) => {
       worker.onmessage = (
         event: MessageEvent<WorkerMessage | RawProcessEventMessage>,
       ) => {
@@ -339,6 +349,10 @@ export class Machine extends EventEmitter<{
               event.data.name,
               event.data.user_module,
               event.data.user_memory,
+              event.data.workerId,
+              event.data.taskToken,
+              event.data.mode,
+              event.data.forkPid,
             );
             break;
           case "boot_console_write":
@@ -348,14 +362,22 @@ export class Machine extends EventEmitter<{
             boot_console_close();
             break;
           case "run_on_main":
-            instance.exports.__indirect_function_table
-              .get(event.data.fn)!(event.data.arg);
-            break;
+            throw new Error(
+              "[K5] run_on_main from a secondary worker is unsupported in the single-authority path",
+            );
           case "process_event": {
             const raw: RawKernelProcessEvent = event.data;
             this.#dispatchProcessEvent(raw);
             break;
           }
+          case "k4_diag":
+            // K4 diagnostic stage markers are observed data — surface them,
+            // never crash the main thread on them.
+            this.emit("k4_diag", event.data);
+            break;
+          case "authority_diag":
+            this.emit("authority_diag", event.data);
+            break;
           case "d1_trace_export": {
             const decoded = decodeD1TraceExport(event.data);
             if (decoded !== null) this.emit("d1_trace", decoded);
@@ -372,22 +394,122 @@ export class Machine extends EventEmitter<{
             break;
           }
           case "broker_kick": {
-            // K4R2: Delegate to extracted production function (shared with witness)
-            const exports = instance.exports as Record<string, unknown>;
-            serviceBrokerKick(
-              (nr, a0, a1, a2, a3, a4, a5) =>
-                (exports.syscall as Function)(nr, a0, a1, a2, a3, a4, a5),
-              this.#brokerSab,
-              {
-                getPid: () => (exports.kwa_get_last_pid as () => number)(),
-                getTgid: typeof exports.kwa_get_last_tgid === "function"
-                  ? () => (exports.kwa_get_last_tgid as () => number)()
-                  : () => 0,
-                getGeneration: () => (exports.kwa_get_last_generation as () => number)(),
-              },
-            );
+            // Brokered syscalls are served only by the kernel authority; the
+            // main thread owns no kernel instance and never pumps the SAB.
+            if (!authorityWorker) {
+              throw new Error(
+                "[K5] broker_kick before the authority worker exists",
+              );
+            }
+            authorityWorker.postMessage({ type: "authority_broker_kick" });
             break;
           }
+          case "fork_copied":
+            // Fork child acked its VAS snapshot: wake the parked parent via
+            // the kernel fork_copied export — through the authority only.
+            if (!authorityWorker) {
+              throw new Error(
+                "[K5] fork_copied before the authority worker exists",
+              );
+            }
+            authorityWorker.postMessage({
+              type: "authority_fork_copied",
+              pid: event.data.pid,
+            });
+            break;
+          case "user_task_error":
+            if (!authorityWorker) {
+              throw new Error(
+                "[K5] user_task_error before the authority worker exists",
+              );
+            }
+            authorityWorker.postMessage({
+              type: "user_task_error",
+              taskToken: event.data.taskToken,
+              reason: event.data.reason,
+            });
+            break;
+          case "virtio_cmd": {
+            // Execute the device op against the real VirtioDevice in main.
+            if (!vimports) {
+              worker.postMessage({
+                type: "virtio_result",
+                seq: event.data.seq,
+                ok: false,
+                value: 0,
+              });
+              console.error("[K5] virtio_cmd before device binding");
+              break;
+            }
+            const { seq, dev, op, args } = event.data;
+            try {
+              // virtio_imports binds plain functions in main; the Suspending
+              // arm only exists on the authority side, so main always holds
+              // the callable arm of the shared Imports union.
+              const callVirtio = vimports as {
+                set_features(dev: number, features: bigint): void;
+                setup(
+                  dev: number,
+                  irq: number,
+                  is_config_addr: number,
+                  is_vring_addr: number,
+                  config_addr: number,
+                  config_len: number,
+                ): void;
+                enable_vring(
+                  dev: number,
+                  vq: number,
+                  size: number,
+                  desc_addr: number,
+                ): void;
+                disable_vring(dev: number, vq: number): void;
+                notify(dev: number, vq: number): void;
+              };
+              if (op === "set_features") {
+                callVirtio.set_features(dev, event.data.features ?? 0n);
+              } else if (op === "setup") {
+                callVirtio.setup(
+                  dev,
+                  args[0]!,
+                  args[1]!,
+                  args[2]!,
+                  args[3]!,
+                  args[4]!,
+                );
+              } else if (op === "enable_vring") {
+                callVirtio.enable_vring(dev, args[0]!, args[1]!, args[2]!);
+              } else if (op === "disable_vring") {
+                callVirtio.disable_vring(dev, args[0]!);
+              } else {
+                callVirtio.notify(dev, args[0]!);
+              }
+              worker.postMessage({
+                type: "virtio_result",
+                seq,
+                ok: true,
+                value: 0,
+              });
+            } catch (error) {
+              worker.postMessage({
+                type: "virtio_result",
+                seq,
+                ok: false,
+                value: 0,
+              });
+              console.error(
+                `[K5] virtio ${op} dev=${dev} failed:`,
+                String((error as Error)?.message ?? error),
+              );
+            }
+            break;
+          }
+          case "authority_broker_kick":
+          case "k5a_ping":
+          case "authority_fork_copied":
+          case "authority_irq":
+          case "virtio_result":
+            // Authority-directed payloads; never valid arriving at main.
+            break;
           default:
             unreachable(event.data);
         }
@@ -395,102 +517,90 @@ export class Machine extends EventEmitter<{
       worker.onerror = (event) => {
         this.emit("error", event);
       };
+    };
+
+    const spawn_worker = (
+      fn: number,
+      arg: number,
+      name: string,
+      user_module: WebAssembly.Module | null,
+      user_memory: WebAssembly.Memory | null,
+      workerId?: number,
+      taskToken?: number,
+      mode?: InitMessage["mode"],
+      forkPid?: number,
+    ) => {
+      console.log(
+        `[SPW] fn=${fn} name=${name} umodule=${typeof user_module}:${String(user_module).slice(0, 40)} umem=${typeof user_memory}:${String(user_memory)} taskToken=${taskToken} mode=${mode}`,
+      );
+      const worker = new Worker(new URL("./worker.js", import.meta.url), {
+        type: "module",
+        name,
+      });
+      this.#workers.push(worker);
+      wireWorker(worker);
       worker.postMessage(
         {
           fn,
           arg,
-          // K3: vmlinux removed — secondary workers MUST NOT receive kernel module
+          // K3/K5A: secondary workers NEVER receive the kernel module;
+          // authority creation is exclusive to the Machine.boot path below.
           memory: this.#memory,
-          parent_tls_base,
           parent_user_module: user_module,
           parent_user_memory: user_memory,
-          // K4: deliver broker SAB and worker ID for secondary worker syscall routing
+          // K4/K5: broker SAB + transport worker id for syscall routing.
+          // Authority-assigned ids are used verbatim (registry-bound).
           brokerSab: this.#brokerSab,
-          workerId: this.#nextWorkerId++,
+          workerId: workerId ?? this.#nextWorkerId++,
+          taskToken,
+          mode,
+          forkPid,
           d1TraceEnabled: this.#d1_trace_enabled,
           d1RunId: this.#d1_run_id,
         } satisfies InitMessage,
       );
     };
 
-    const unavailable = () => {
-      throw new Error("not available on main thread");
-    };
-
-    const imports = {
-      env: { memory: this.#memory },
-      boot: {
-        get_devicetree: (buf, size) => {
-          assert(size >= devicetree.byteLength, "Device tree truncated");
-          this.memory.set(devicetree, buf);
-        },
-        get_initramfs: (buf, size) => {
-          assert(size >= initramfs.byteLength, "Initramfs truncated");
-          this.memory.set(initramfs, buf);
-          return initramfs.byteLength;
-        },
+    // K5: single-authority boot. The main thread constructs no kernel
+    // instance and never blocks on Atomics.wait; the dedicated authority
+    // worker owns the one vmlinux Instance, all kernel task continuations,
+    // and every brokered syscall. Devices stay in main: the kernel reaches
+    // them through virtio_cmd round-trips; device IRQs return through
+    // authority_irq delivery.
+    vimports = virtio_imports({
+      memory: this.#memory,
+      devices: this.#devices,
+      ncpus: this.#ncpus,
+      trigger_irq_for_cpu: (cpu, irq) => {
+        authorityWorker?.postMessage({ type: "authority_irq", cpu, irq });
       },
-      kernel: kernel_imports({
-        is_worker: false,
-        memory: this.#memory,
-        spawn_worker,
-        boot_console_write,
-        boot_console_close,
-        run_on_main: unavailable,
-        get_user_module: unavailable,
-        get_user_memory: unavailable,
-        process_event_handler: (
-          event_kind,
-          run_id_hi,
-          run_id_lo,
-          event_seq,
-          pid,
-          tgid,
-          ppid,
-          worker_id,
-          data0,
-          data1,
-          comm,
-        ) => {
-          this.#dispatchProcessEvent({
-            event_kind,
-            run_id_hi,
-            run_id_lo,
-            event_seq,
-            pid,
-            tgid,
-            ppid,
-            worker_id,
-            data0,
-            data1,
-            comm,
-          });
-        },
-      }),
-      user: {
-        compile: unavailable,
-        instantiate: unavailable,
-        call: unavailable,
-        switch_entry: unavailable,
-        fork_user: unavailable,
-        call_signal_handler: unavailable,
-        read: unavailable,
-        write: unavailable,
-        write_zeroes: unavailable,
-      },
-      virtio: virtio_imports({
-        memory: this.#memory,
-        devices: this.#devices,
-        ncpus: this.#ncpus,
-        trigger_irq_for_cpu(cpu, irq) {
-          instance.exports.trigger_irq_for_cpu(cpu, irq);
-        },
-      }),
-    } satisfies Imports;
+    });
 
-    const instance =
-      (await WebAssembly.instantiate(vmlinux, imports)) as Instance;
-    instance.exports.boot();
+    const authority = new Worker(new URL("./worker.js", import.meta.url), {
+      type: "module",
+      name: "kernel-authority",
+    });
+    this.#workers.push(authority);
+    authorityWorker = authority;
+    wireWorker(authority);
+    authority.postMessage(
+      {
+        fn: 0,
+        arg: 0,
+        memory: this.#memory,
+        parent_user_module: null,
+        parent_user_memory: null,
+        isKernelAuthority: true,
+        kernelModule: vmlinux,
+        bootViaExport: true,
+        devicetree,
+        initramfs: initramfs.length > 0 ? initramfs : null,
+        brokerSab: this.#brokerSab,
+        workerId: 1,
+        d1TraceEnabled: this.#d1_trace_enabled,
+        d1RunId: this.#d1_run_id,
+      } satisfies InitMessage,
+    );
   }
 }
 

@@ -4,10 +4,20 @@ import {
   type Imports,
   type Instance,
   kernel_imports,
+  TERMINAL_TASK_EXIT,
+  USER_IMAGE_REPLACED,
+  YIELD_REASON_IDLE,
 } from "./wasm.ts";
 import { D1RingBuffer, type D1Record, type D1RingMetadata } from "./d1-ring-buffer.ts";
 import { wrapSyscall } from "./d1-syscall-wrapper.ts";
-import { BrokerClient } from "./kwa-broker.ts";
+import {
+  BrokerClient,
+  idx,
+  N_SLOTS,
+  OFF,
+  S,
+  STATE,
+} from "./kwa-broker.ts";
 
 export interface InitMessage {
   fn: number;
@@ -22,6 +32,24 @@ export interface InitMessage {
   workerId?: number;
   d1TraceEnabled?: boolean;
   d1RunId?: string;
+  /** K5A: true for the dedicated kernel authority worker spawned by setup.c. */
+  isKernelAuthority?: boolean;
+  /** K5A: vmlinux Module delivered ONLY to kernel authority workers (K3 invariant). */
+  kernelModule?: WebAssembly.Module;
+  /** K5A diagnostic boot inputs served by the authority's boot imports.
+   * devicetree must fit the kernel's static FDT buffer (setup.c bound 2048);
+   * initramfs must fit its static initramfs buffer (setup.c bound 512). */
+  bootViaExport?: boolean;
+  devicetree?: Uint8Array;
+  initramfs?: Uint8Array | null;
+  /** K5: KERNEL-OWNED task token this user worker executes for. Sent with
+   * every broker request as the routing key (kernel truth still stamped C-side). */
+  taskToken?: number;
+  /** K5: user entry mode — "start": image entrypoint; "switch_entry": CLONE_VM
+   * table entry; "fork_user": fresh-memory fork resume with fork-ack. */
+  mode?: "start" | "switch_entry" | "fork_user";
+  /** K5: real child pid for fork_user fork-ack (kernel fork_copied export). */
+  forkPid?: number;
 }
 export type WorkerMessage =
   | {
@@ -34,18 +62,63 @@ export type WorkerMessage =
     parent_tls_base?: number;
     brokerSab?: SharedArrayBuffer;
     workerId?: number;
+    /** K5A: kernel authority workers bypass K4 secondary-worker gate. */
+    isKernelAuthority?: boolean;
+    /** K5: authority-originated spawn — KERNEL-OWNED task token + entry mode.
+     * When workerId is present the authority assigned it (registry-bound);
+     * main MUST use it instead of allocating its own. */
+    taskToken?: number;
+    mode?: "start" | "switch_entry" | "fork_user";
+    forkPid?: number;
   }
   | { type: "boot_console_write"; message: ArrayBuffer }
   | { type: "boot_console_close" }
   | { type: "run_on_main"; fn: number; arg: number }
-  | { type: "broker_kick" }
+  | { type: "broker_kick"; workerId?: number }
   | { type: "worker_done"; reason: string }
   | {
     type: "d1_trace_export";
     runId: string;
     records: D1Record[];
     metadata: D1RingMetadata;
-  };
+  }
+  | {
+    type: "authority_diag";
+    stage: string;
+    ok: boolean;
+    detail: AuthorityDiagMessage["detail"];
+    ts: number;
+  }
+  /** K4 diagnostic stage markers from secondary workers — surfaced by main,
+   * never an unreachable-main error. */
+  | {
+    type: "k4_diag";
+    stage: string;
+    detail?: Record<string, unknown>;
+  }
+  /** K5: fork child acks its VAS snapshot; authority wakes the parked parent
+   * via the kernel fork_copied export. */
+  | { type: "fork_copied"; pid: number; taskToken: number }
+  /** K5: user worker ended abnormally (image returned without exit / trap);
+   * the authority rejects that task's user.call with the real error. */
+  | { type: "user_task_error"; taskToken: number; reason: string }
+  /** K5: main → authority: fork ack relay (from a user worker's fork_copied). */
+  | { type: "authority_fork_copied"; pid: number }
+  /** K5: main → authority: device IRQ relay — deliver through the kernel. */
+  | { type: "authority_irq"; cpu: number; irq: number }
+  /** K5: authority → main virtio device round-trip (Suspending import). */
+  | { type: "virtio_cmd"; seq: number; dev: number; op: VirtioOp; args: number[]; features?: bigint }
+  | { type: "virtio_result"; seq: number; ok: boolean; value: number }
+  | { type: "authority_broker_kick" }
+  | { type: "k5a_ping" };
+
+/** K5: virtio device operations relayed authority→main. */
+export type VirtioOp =
+  | "set_features"
+  | "setup"
+  | "enable_vring"
+  | "disable_vring"
+  | "notify";
 
 // K4 DIAGNOSTIC: structured stage markers for failure localization
 type K4DiagStage =
@@ -72,14 +145,58 @@ type K4DiagStage =
 
 function postK4Diag(stage: K4DiagStage, detail?: Record<string, unknown>): void {
  try {
- postMessage({ type: "k4_diag", stage, detail } as unknown as WorkerMessage);
+ postMessage({ type: "k4_diag", stage, detail });
  } catch { /* best-effort diagnostic */ }
+}
+
+/** K5A diagnostic packet: the only authority evidence channel. `ok:false`
+ * marks genuine failure or model-blocked evidence — never a soft warning.
+ * detail may carry a shared WebAssembly.Memory so observers (generic Node
+ * adapter) can watch real guest result buffers. */
+export interface AuthorityDiagMessage {
+  type: "authority_diag";
+  stage: string;
+  ok: boolean;
+  detail: Record<
+    string,
+    string | number | boolean | null | WebAssembly.Memory
+  >;
+  ts: number;
+}
+
+function postK5Diag(
+  stage: string,
+  ok: boolean,
+  detail: Record<
+    string,
+    string | number | boolean | null | WebAssembly.Memory
+  >,
+): void {
+  postMessage({ type: "authority_diag", stage, ok, detail, ts: performance.now() });
+}
+
+/** Message handlers the authority block registers once initialized; the
+ * onmessage dispatcher routes authority-directed messages to them. */
+let authorityHandlers: {
+  ping: () => void;
+  kick: () => void;
+  forkCopied: (pid: number) => void;
+  irq: (cpu: number, irq: number) => void;
+  virtioResult: (seq: number, ok: boolean, value: number) => void;
+  userTaskError: (taskToken: number, reason: string) => void;
+} | null = null;
+
+function isInitMessage(data: unknown): data is InitMessage {
+  return !(typeof data === "object" && data !== null && "type" in data);
 }
 const unavailable = () => {
   throw new Error("not available on worker thread");
 };
 
 const postMessage = self.postMessage as (message: WorkerMessage) => void;
+
+/** Global timer id: number in browser/Deno, NodeJS.Timeout under Node. */
+type TimerHandle = ReturnType<typeof setTimeout>;
 
 let workerDoneSent = false;
 function signalWorkerDone(reason: string): void {
@@ -114,6 +231,7 @@ function user_imports({
   parent_tls_base,
   brokerSab,
   workerId,
+  taskToken,
 }: {
   kernel_memory: WebAssembly.Memory;
   get_kernel_instance: () => Instance;
@@ -122,6 +240,8 @@ function user_imports({
   parent_user_memory: WebAssembly.Memory | null;
   brokerSab?: SharedArrayBuffer;
   workerId?: number;
+  /** K5: KERNEL-OWNED task token — sent as the broker request routing key. */
+  taskToken?: number;
 }): {
   module: WebAssembly.Module | null;
   memory: WebAssembly.Memory | null;
@@ -141,7 +261,9 @@ function user_imports({
     assert(instance);
     const { _start } = instance.exports;
     assert(typeof _start === "function", "_start not found");
-    _start();
+    // K5 guests export _start(param i32); extra args are ignored by the JS API
+    // for 0-param starts, so 0 satisfies both signatures.
+    _start(0);
     throw new Error("_start reached the end without exiting");
   }
   let call_entry = call_start;
@@ -189,8 +311,8 @@ function user_imports({
         nr: number, arg0: number, arg1: number, arg2: number,
         arg3: number, arg4: number, arg5: number,
       ): number => {
-        return brokerClient.invoke(nr, arg0, arg1, arg2, arg3, arg4, arg5, 0, 0, () => {
-          postMessage({ type: "broker_kick" });
+        return brokerClient.invoke(nr, arg0, arg1, arg2, arg3, arg4, arg5, taskToken ?? 0, 0, () => {
+          postMessage({ type: "broker_kick", workerId });
         }).result;
       };
 
@@ -460,16 +582,10 @@ function user_imports({
           );
         }
         // Release the parked parent: the VAS snapshot is now complete, so the
-        // parent may resume from its clone return point.
-        try {
-          const kexp = get_kernel_instance().exports as Record<string, unknown>;
-          if (typeof kexp.fork_copied === "function") {
-            (kexp.fork_copied as (pid: number) => void)(pid);
-            console.log("[FORK] ack fork_copied pid=" + pid);
-          }
-        } catch {
-          /* ack is best-effort; parent has a bounded timeout fallback */
-        }
+        // parent may resume from its clone return point. K5: the ack travels
+        // fork_copied → main → authority → promising(kernel fork_copied);
+        // secondary workers have no kernel instance (K3) and never call it.
+        postMessage({ type: "fork_copied", pid, taskToken: 0 });
         // M115 USER_FORK_RESUME: the guest (blink x86 emulator) saved its
         // Machine* + snapshot in its own .data, which is now copied verbatim
         // into this fresh child memory. Jump straight to blink's resume
@@ -537,9 +653,47 @@ function user_imports({
   };
 }
 
-self.onmessage = (event: MessageEvent<InitMessage>) => {
+self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
+  const data: InitMessage | WorkerMessage = event.data;
+
+  // Authority service messages (main → authority forwarding).
+  if (!isInitMessage(data)) {
+    if (data.type === "authority_broker_kick") {
+      if (authorityHandlers) authorityHandlers.kick();
+      else postK5Diag("BROKER_DEFERRED_PEER_LIVE", false, { authorityReady: false });
+      return;
+    }
+    if (data.type === "k5a_ping") {
+      if (authorityHandlers) authorityHandlers.ping();
+      else postK5Diag("K5A_PONG", true, { authorityReady: false });
+      return;
+    }
+    if (data.type === "authority_fork_copied") {
+      if (authorityHandlers) authorityHandlers.forkCopied(data.pid);
+      else postK5Diag("FORK_ACK_FAILED", false, { authorityReady: false, pid: data.pid });
+      return;
+    }
+    if (data.type === "authority_irq") {
+      if (authorityHandlers) authorityHandlers.irq(data.cpu, data.irq);
+      else postK5Diag("IRQ_DELIVERY_FAILED", false, { authorityReady: false, cpu: data.cpu, irq: data.irq });
+      return;
+    }
+    if (data.type === "virtio_result") {
+      if (authorityHandlers) authorityHandlers.virtioResult(data.seq, data.ok, data.value);
+      else postK5Diag("VIRTIO_RESULT_UNATTRIBUTED", false, { seq: data.seq, authorityReady: false });
+      return;
+    }
+    if (data.type === "user_task_error") {
+      if (authorityHandlers) authorityHandlers.userTaskError(data.taskToken, data.reason);
+      else postK5Diag("USER_TASK_ERROR_UNBOUND", false, { taskToken: data.taskToken, reason: data.reason });
+      return;
+    }
+    postK5Diag("FATAL", false, { code: "UNKNOWN_WORKER_MESSAGE", msgType: data.type });
+    return;
+  }
+
  const { fn, arg, memory, parent_user_module, parent_user_memory,
- parent_tls_base, brokerSab, workerId } = event.data;
+ parent_tls_base, brokerSab, workerId, mode, taskToken, forkPid } = data;
 
  // K4 DIAG: outer synchronous exception boundary
  let currentStage: K4DiagStage = "INIT_RECEIVED";
@@ -547,17 +701,1199 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
 
  postK4Diag("INIT_RECEIVED", { fn, arg, workerId, hasBrokerSab: !!brokerSab, hasParentModule: !!parent_user_module, hasParentMemory: !!parent_user_memory });
 
- if (event.data.d1TraceEnabled === true) {
+ if (data.d1TraceEnabled === true) {
  d1TraceEnabled = true;
- d1RunId = event.data.d1RunId ?? "d1-run";
+ d1RunId = data.d1RunId ?? "d1-run";
  d1TraceBuffer.recordLifecycle("trace_initialized", d1RunId);
  d1TraceBuffer.recordLifecycle("worker_start_message_received", d1RunId);
  }
- // K3/K4: Secondary workers MUST NOT instantiate vmlinux.
- // Instantiate ONLY the user module; route all syscalls through broker SAB.
- if (!parent_user_module || !parent_user_memory) {
- throw new Error("[K4] secondary worker missing user module/memory");
- }
+    // K5A DIAGNOSTIC: single-authority kernel worker. Exactly one vmlinux
+    // Instance is constructed here (single construction site); boot runs via
+    // exports.boot() under real JSPI suspension; kernel task spawns become
+    // continuations on this same instance. This is uncommitted diagnostic
+    // work pending the principal decision on the untouched-globals scheduler
+    // model — not a shipped capability.
+    if (data.isKernelAuthority === true) {
+      const kernelModule = data.kernelModule;
+      if (!kernelModule) {
+        throw new Error("[K5A] kernel authority worker missing kernelModule");
+      }
+      const devicetree = data.devicetree;
+      const initramfs = data.initramfs;
+
+      // JSPI constructors ship natively (Node ≥24, Chromium ≥137) but are
+      // absent from current TS lib types — single named cast, runtime-guarded.
+      // `never[]` constraints: strictFunctionTypes contravariance makes
+      // `unknown[]` reject concrete callback signatures (never is assignable
+      // to every param type, so concrete F satisfies without `any`).
+      type JspiWebAssembly = typeof WebAssembly & {
+        Suspending?: new <F extends (...args: never[]) => unknown>(
+          fn: F,
+        ) => WebAssembly.ImportValue;
+        promising?: <F extends (...args: never[]) => unknown>(
+          fn: F,
+        ) => (...args: Parameters<F>) => Promise<ReturnType<F>>;
+      };
+      const wasmJspi = WebAssembly as JspiWebAssembly;
+      if (
+        typeof wasmJspi.Suspending !== "function" ||
+        typeof wasmJspi.promising !== "function"
+      ) {
+        postK5Diag("NOT_PROVEN", false, { code: "JSPI_UNAVAILABLE" });
+        throw new Error(
+          "[K5A] JSPI (WebAssembly.Suspending/promising) unavailable",
+        );
+      }
+
+      // table.get yields a wasm exported function; JSPI promising needs that
+      // runtime kind but TS lib types it loosely — inline named casts used.
+
+      currentStage = "BEFORE_KERNEL_IMPORTS";
+      postK4Diag("BEFORE_KERNEL_IMPORTS", { isKernelAuthority: true });
+
+      postK5Diag("AUTHORITY_INIT_RECEIVED", true, {
+        hasKernelModule: true,
+        hasDevicetree: devicetree instanceof Uint8Array,
+        hasInitramfs: initramfs instanceof Uint8Array,
+        hasBrokerSab: !!brokerSab,
+        workerId: workerId ?? null,
+        bootViaExport: true,
+      });
+
+      let instance: WebAssembly.Instance | null = null;
+      let bootReturned = false;
+
+      // ---- K5 authority scheduler state ---------------------------------
+      // Exactly one vmlinux Instance (this worker). Task tokens are opaque
+      // KERNEL-OWNED addresses; the host never authors PIDs/tasks and
+      // starts/resumes ONLY kernel-provided nextTask targets.
+      interface TaskRecord {
+        token: number;
+        name: string;
+        /** Kernel trampoline entry (task_entry/wasm_call_clone_fn/…) table
+         * index + arg, resolved against the KERNEL instance table. */
+        kernelFn: number;
+        kernelArg: number;
+        state: "registered" | "running" | "parked" | "dead";
+        /** Per-task user image (compile/instantiate target). */
+        userModule: WebAssembly.Module | null;
+        userMemory: WebAssembly.Memory | null;
+        /** Guest entry recorded by switch_entry/fork_user for user.call. */
+        entryMode: "start" | "switch_entry" | "fork_user";
+        guestFn: number;
+        guestArg: number;
+        forkPid: number;
+        /** CLONE_VM/fork inheritance source (kernel task token). */
+        inheritFrom: number;
+        /** Live pure user worker executing this task's guest code. */
+        userWorker: Worker | null;
+        userWorkerId: number;
+        /** In-flight user.call suspension of this task's kernel stack. */
+        pendingCall: {
+          resolve: () => void;
+          reject: (reason: unknown) => void;
+        } | null;
+      }
+      const tasks = new Map<number, TaskRecord>();
+      /** taskToken → active yield suspension (kernel parked on this stack). */
+      const suspensions = new Map<
+        number,
+        { resolve: () => void; reject: (reason: unknown) => void; timer: TimerHandle | null }
+      >();
+      let executingTask = 0;
+      /** K5: C may issue a REAL opaque identity for a frame the host
+       * registered under a different wire token (boot task starts under wire
+       * token 0; C reports its own identity on the first yield). Aliases map
+       * issued → canonical so ONE frame never starts twice. */
+      const tokenAlias = new Map<number, number>();
+      const canonicalToken = (token: number): number =>
+        tokenAlias.get(token) ?? token;
+      /** Transport registry: authority-assigned workerId → kernel taskToken.
+       * Broker requests are validated against THIS binding; body TASK_ID/TID
+       * from callers are non-authoritative and never dispatched. */
+      const workerIdToTask = new Map<number, number>();
+      let nextUserWorkerId = 2; // 1 is the authority worker itself
+      let nextDispatchId = 1;
+
+      // ---- broker dispatch state -----------------------------------------
+      if (!(brokerSab instanceof SharedArrayBuffer)) {
+        throw new Error("[K5] kernel authority worker missing brokerSab");
+      }
+      const brokerU32 = new Uint32Array(brokerSab);
+      const brokerI32 = new Int32Array(brokerSab);
+      interface PendingDispatch {
+        slot: number;
+        taskToken: number;
+        workerId: number;
+        clientReqId: number;
+        slotGen: number;
+        nr: number;
+      }
+      const pendingDispatch = new Map<number, PendingDispatch>();
+      let pumpRunning = false;
+      let pumpQueued = false;
+      /** promising()-wrapped kwa_syscall_for_task; assigned at boot tail. */
+      let promisingKwaSyscall:
+        | ((...args: number[]) => Promise<number>)
+        | null = null;
+      /** authority→main virtio round-trip state. */
+      let nextVirtioSeq = 1;
+      const virtioPending = new Map<
+        number,
+        { resolve: (v: number) => void; reject: (e: unknown) => void }
+      >();
+      /** KernelContext idle-kick contract: the parked idle continuation
+       * (YIELD_REASON_IDLE), resolved early when a completion/wake may have
+       * made a task runnable — idle re-parks with the same deadline if not. */
+      let idleSuspension: {
+        token: number;
+        entry: { resolve: () => void; reject: (reason: unknown) => void; timer: TimerHandle | null };
+      } | null = null;
+
+      const authorityNowNs = (): bigint =>
+        BigInt(Math.round((performance.now() + performance.timeOrigin) * 200)) *
+        5000n;
+
+      const clearSuspensionTimer = (
+        s: { timer: TimerHandle | null },
+      ): void => {
+        if (s.timer !== null) {
+          clearTimeout(s.timer);
+          s.timer = null;
+        }
+      };
+
+      const onHaltWorker = (): never => {
+        // A halt must never self.close() the authority: that would kill every
+        // parked continuation. Surface as a continuation-scoped rejection.
+        postK5Diag("NOT_PROVEN", false, {
+          code: "AUTHORITY_HALT_BLOCKED",
+          parked: suspensions.size,
+          tasks: tasks.size,
+        });
+        throw HALT_KERNEL;
+      };
+
+      const maybeQuiesce = (origin: string) => {
+        if (!bootReturned || suspensions.size > 0 || tasks.size > 0) return;
+        postK5Diag("BOOT_RETURNED", true, { quiesced: true, origin });
+        signalWorkerDone("authority_quiesced");
+      };
+
+      // ---- K5 scheduler: kernel-owned tokens, kernel-named successors ----
+      const startTask = (t: TaskRecord): void => {
+        if (!instance) throw new Error("[K5] task start before kernel instance");
+        // Start through the KERNEL-OWNED trampoline export: C resolves its
+        // own bootstrap args; the host never authors task entries.
+        const entryExport: unknown = instance.exports.kwa_task_entry;
+        if (typeof entryExport !== "function") {
+          postK5Diag("FATAL", false, {
+            code: "TASK_ENTRY_EXPORT_MISSING",
+            taskToken: t.token,
+          });
+          throw new Error("[K5] vmlinux exports.kwa_task_entry missing");
+        }
+        t.state = "running";
+        executingTask = t.token;
+        postK5Diag("TASK_STARTED", true, {
+          taskToken: t.token,
+          name: t.name,
+        });
+        const promisingEntry = wasmJspi.promising!(
+          entryExport as (token: number) => unknown,
+        );
+        const p = promisingEntry(t.token) as Promise<void>;
+        p.then(() => {
+          // task_entry_inner ends in do_exit(0) → finish_task unwinds the
+          // stack; a plain return means the kernel trampoline broke contract.
+          if (tasks.has(t.token)) {
+            postK5Diag("NOT_PROVEN", false, {
+              code: "TASK_RETURNED_WITHOUT_FINISH_TASK",
+              taskToken: t.token,
+              name: t.name,
+            });
+            tasks.delete(t.token);
+          }
+          // Settlement is asynchronous: a kernel-named successor may already
+          // be executing. Clear attribution ONLY when it is still ours.
+          if (executingTask === t.token) executingTask = 0;
+          maybeQuiesce("task_returned");
+        }).catch((error: unknown) => {
+          if (error === USER_IMAGE_REPLACED) {
+            // Exec: the OLD image's kernel frame unwinds while the SAME task
+            // continues on its new-image continuation (live syscall frame).
+            // The Linux task did NOT die — keep the registry entry, keep
+            // executingTask attribution (old and new frames share the token,
+            // so the guarded clear below would wrongly erase the successor),
+            // and do not count this toward quiescence.
+            postK5Diag("TASK_IMAGE_REPLACED", true, {
+              taskToken: t.token,
+              name: t.name,
+            });
+            return;
+          }
+          const terminal =
+            error === HALT_KERNEL || error === TERMINAL_TASK_EXIT;
+          if (!terminal && tasks.has(t.token)) {
+            postK5Diag("TASK_CONTINUATION_FAILED", false, {
+              taskToken: t.token,
+              name: t.name,
+              errorName: error instanceof Error ? error.name : "unknown",
+              stack: error instanceof Error ? error.stack ?? null : null,
+              message: String(
+                error instanceof Error ? error.message : error,
+              ).slice(0, 300),
+            });
+          }
+          tasks.delete(t.token);
+          // Settlement is asynchronous: a kernel-named successor may already
+          // be executing. Clear attribution ONLY when it is still ours.
+          if (executingTask === t.token) executingTask = 0;
+          maybeQuiesce(terminal ? "task_terminal" : "task_failed");
+        });
+      };
+
+      const clearIdleIf = (token: number): void => {
+        if (idleSuspension && idleSuspension.token === token) {
+          idleSuspension = null;
+        }
+      };
+
+      /** Idle-kick rule (KernelContext): after a completion/wake, resolve the
+       * parked idle yield early so the scheduler re-evaluates runnability. */
+      const kickIdle = (why: string): void => {
+        if (!idleSuspension) return;
+        const token = idleSuspension.token;
+        const s = suspensions.get(token);
+        if (!s || s !== idleSuspension.entry) {
+          idleSuspension = null;
+          return;
+        }
+        clearSuspensionTimer(s);
+        suspensions.delete(token);
+        clearIdleIf(token);
+        const t = tasks.get(token);
+        if (t) t.state = "running";
+        executingTask = token;
+        postK5Diag("IDLE_KICK", true, { taskToken: token, why });
+        s.resolve();
+      };
+
+      const scheduleTask = (rawToken: number): void => {
+        if (rawToken === 0) return; // 0 = kernel named no successor
+        // Resolve C-issued identities to the canonical wire token (boot root
+        // alias) so a named successor RESUMES the parked frame instead of
+        // attempting a second start.
+        const token = canonicalToken(rawToken);
+        let t = tasks.get(token);
+        if (!t) {
+          // KernelContext contract: SWITCH nextTask is always kernel-named.
+          // A token with no host record is started via kwa_task_entry with a
+          // shell record (C owns its bootstrap args).
+          postK5Diag("TASK_SHELL_REGISTERED", true, { taskToken: token });
+          t = {
+            token,
+            name: "kwa-shell",
+            kernelFn: 0,
+            kernelArg: 0,
+            state: "registered",
+            userModule: null,
+            userMemory: null,
+            entryMode: "start",
+            guestFn: 0,
+            guestArg: 0,
+            forkPid: 0,
+            inheritFrom: 0,
+            userWorker: null,
+            userWorkerId: 0,
+            pendingCall: null,
+          };
+          tasks.set(token, t);
+        }
+        if (t.state === "dead") return;
+        if (t.state === "parked") {
+          const s = suspensions.get(token);
+          if (!s) return;
+          clearSuspensionTimer(s);
+          suspensions.delete(token);
+          clearIdleIf(token);
+          t.state = "running";
+          executingTask = token;
+          postK5Diag("TASK_RESUMED", true, { taskToken: token, name: t.name });
+          s.resolve();
+          return;
+        }
+        if (t.state === "registered") startTask(t);
+      };
+
+      /** IDLE deadline expiry → real timer interrupt delivery.
+       * TIMER_IRQ=2 (arch/wasm/include/asm/irq.h, KernelContext-frozen);
+       * raw logical irq value — the export ORs 1<<irq into per-cpu pending.
+       * cpu 0: K5 scope is cpus:1, single idle pinned on cpu0. No broadcast;
+       * per-cpu idle tokens deferred until cpus>1 is real. */
+      const KWA_TIMER_IRQ = 2;
+      const triggerTimerIrq = (): void => {
+        if (!instance) return;
+        const promisingIrq = wasmJspi.promising!(
+          instance.exports.trigger_irq_for_cpu as (
+            cpu: number,
+            irq: number,
+          ) => void,
+        );
+        promisingIrq(0, KWA_TIMER_IRQ).catch((error: unknown) => {
+          postK5Diag("TIMER_IRQ_FAILED", false, {
+            message: String(error instanceof Error ? error.message : error).slice(0, 200),
+          });
+        });
+      };
+
+      const onKernelYield = (
+        reason: number,
+        deadlineNs: bigint,
+        selfTaskRaw: number,
+        nextTaskRaw: number,
+      ): Promise<void> => {
+        // Resolve through the alias map, and on the FIRST yield from a
+        // wire-registered frame whose C-issued selfTask is unknown, bind
+        // that identity to the executing task's record (boot root: wire 0 ←
+        // C opaque identity). One frame; never a second kwa_task_entry.
+        let selfTask = canonicalToken(selfTaskRaw);
+        if (!tasks.has(selfTask) && executingTask !== selfTask && tasks.has(executingTask)) {
+          tokenAlias.set(selfTaskRaw, executingTask);
+          postK5Diag("TASK_TOKEN_ALIASED", true, {
+            issuedToken: selfTaskRaw,
+            canonicalToken: executingTask,
+          });
+          selfTask = executingTask;
+        }
+        const nextTask = canonicalToken(nextTaskRaw);
+        return new Promise<void>((resolve, reject) => {
+          const entry = {
+            resolve,
+            reject,
+            timer: null as TimerHandle | null,
+          };
+          suspensions.set(selfTask, entry);
+          const t = tasks.get(selfTask);
+          if (t) t.state = "parked";
+          if (reason === YIELD_REASON_IDLE) {
+            idleSuspension = { token: selfTask, entry };
+          }
+          // C passes ABSOLUTE deadlines (process.c/irq.c/delay.c/fork.c).
+          if (deadlineNs > 0n) {
+            const delayMs = Math.max(
+              0,
+              Number(deadlineNs - authorityNowNs()) / 1_000_000,
+            );
+            entry.timer = setTimeout(() => {
+              const cur = suspensions.get(selfTask);
+              if (cur !== entry) return;
+              suspensions.delete(selfTask);
+              clearIdleIf(selfTask);
+              const curTask = tasks.get(selfTask);
+              if (curTask) curTask.state = "running";
+              executingTask = selfTask;
+              // IDLE deadline expiry is a REAL timer interrupt: deliver the
+              // timer IRQ before resolving the park (KernelContext contract).
+              if (reason === YIELD_REASON_IDLE) triggerTimerIrq();
+              postK5Diag("YIELD_RESUME", true, {
+                taskToken: selfTask,
+                reason,
+                via: "deadline",
+                parked: suspensions.size,
+              });
+              resolve();
+            }, delayMs);
+          }
+          postK5Diag("KERNEL_YIELD", true, {
+            taskToken: selfTask,
+            nextTask,
+            reason,
+            deadlineNs: deadlineNs.toString(),
+            parked: suspensions.size,
+          });
+          // Host starts/resumes ONLY the kernel-provided successor.
+          if (nextTaskRaw !== 0 && nextTask !== selfTask) scheduleTask(nextTaskRaw);
+        });
+      };
+
+      /** IRQ/timer-external wake: resolve parked suspensions. C yield loops
+       * re-verify their conditions and re-park — spurious wakes are safe. */
+      const wakeAllSuspensions = (via: string): void => {
+        for (const [token, s] of [...suspensions]) {
+          if (suspensions.get(token) !== s) continue;
+          clearSuspensionTimer(s);
+          suspensions.delete(token);
+          const t = tasks.get(token);
+          if (t) t.state = "running";
+          executingTask = token;
+          s.resolve();
+        }
+        if (via) postK5Diag("SUSPENSIONS_WOKE", true, { via });
+      };
+
+      // ---- terminal handoff ----------------------------------------------
+      const finishTask = (selfTaskRaw: number, nextTaskRaw: number): never => {
+        // Resolve C-issued identities to canonical wire tokens: slot
+        // cancellation keys on the canonical token stored in pendingDispatch,
+        // and the registry/attribution cleanup must hit the same record the
+        // frame was started under (boot root alias included).
+        const selfTask = canonicalToken(selfTaskRaw);
+        const nextTask = canonicalToken(nextTaskRaw);
+        const t = tasks.get(selfTask);
+        postK5Diag("TASK_TERMINAL", true, {
+          taskToken: selfTask,
+          rawSelfTask: selfTaskRaw,
+          name: t?.name ?? "unknown",
+          nextTask,
+        });
+        // 1. Terminal cancellation: free this task's outstanding claimed
+        // broker slots WITHOUT inventing a Linux result (exec/exit never
+        // return). Observers read TERMINAL_CANCEL_COUNT — never a fake status.
+        for (const [dispatchId, pd] of [...pendingDispatch]) {
+          if (pd.taskToken !== selfTask) continue;
+          pendingDispatch.delete(dispatchId);
+          const si = idx(pd.slot, S.STATE);
+          if (Atomics.load(brokerI32, si) === STATE.CLAIMED) {
+            Atomics.add(brokerU32, OFF.TERMINAL_CANCEL_COUNT, 1);
+            Atomics.store(brokerI32, si, STATE.FREE);
+            Atomics.store(brokerU32, idx(pd.slot, S.OWNER), 0);
+            Atomics.notify(brokerI32, si, 1);
+            postK5Diag("BROKER_SLOT_TERMINALLY_CANCELLED", true, {
+              slot: pd.slot,
+              dispatchId,
+              taskToken: selfTask,
+            });
+          } else {
+            Atomics.add(brokerU32, OFF.POST_FREE_DISPATCH_COUNT, 1);
+          }
+        }
+        if (t) {
+          t.state = "dead";
+          // 2. Retire the pure user worker: its blocked broker wait can never
+          // complete — real retirement after kernel death, not a fake return.
+          if (t.userWorker) {
+            try {
+              t.userWorker.terminate();
+            } catch {
+              /* already gone */
+            }
+            t.userWorker = null;
+          }
+          if (t.userWorkerId !== 0) workerIdToTask.delete(t.userWorkerId);
+          // 3. Unwind this task's parked kernel stack (user.call frame).
+          if (t.pendingCall) {
+            const pc = t.pendingCall;
+            t.pendingCall = null;
+            pc.reject(TERMINAL_TASK_EXIT);
+          }
+          tasks.delete(selfTask);
+        }
+        const s = suspensions.get(selfTask);
+        if (s) {
+          clearSuspensionTimer(s);
+          suspensions.delete(selfTask);
+          s.reject(TERMINAL_TASK_EXIT);
+        }
+        // 4. The kernel names the successor; start/resume ONLY that target.
+        scheduleTask(nextTaskRaw);
+        maybeQuiesce("finish_task");
+        throw HALT_KERNEL;
+      };
+
+      // ---- per-request completion (C-local identity, never getters) ------
+      const onSyscallComplete = (
+        taskToken: number,
+        requestId: number,
+        result: number,
+        pid: number,
+        tgid: number,
+        generation: number,
+      ): void => {
+        const pd = pendingDispatch.get(requestId);
+        if (!pd) {
+          // Completion with no matching pending dispatch: measured and
+          // dropped — never written anywhere, never fabricated.
+          Atomics.add(brokerU32, OFF.UNATTRIBUTED_RESPONSE_COUNT, 1);
+          postK5Diag("UNATTRIBUTED_RESPONSE", false, {
+            requestId,
+            taskToken,
+          });
+          return;
+        }
+        pendingDispatch.delete(requestId);
+        const si = idx(pd.slot, S.STATE);
+        if (Atomics.load(brokerI32, si) !== STATE.CLAIMED) {
+          Atomics.add(brokerU32, OFF.POST_FREE_DISPATCH_COUNT, 1);
+          postK5Diag("POST_FREE_DISPATCH", false, {
+            slot: pd.slot,
+            requestId,
+          });
+          return;
+        }
+        Atomics.store(brokerI32, idx(pd.slot, S.RESULT), result);
+        Atomics.store(brokerI32, idx(pd.slot, S.ERRNO), result < 0 ? -result : 0);
+        Atomics.store(brokerU32, idx(pd.slot, S.RESP_ID), pd.clientReqId);
+        Atomics.store(brokerU32, idx(pd.slot, S.RESP_GENERATION), pd.slotGen);
+        Atomics.store(brokerI32, idx(pd.slot, S.KERNEL_PID), pid);
+        Atomics.store(brokerI32, idx(pd.slot, S.KERNEL_TGID), tgid);
+        Atomics.store(brokerU32, idx(pd.slot, S.KERNEL_GENERATION), generation);
+        // Observed evidence: emitted ONLY from the real C completion stamp.
+        postK5Diag("BROKER_SERVED", true, {
+          taskToken,
+          workerId: pd.workerId,
+          requestId,
+          nr: pd.nr,
+          result,
+          pid,
+          tgid,
+          generation,
+        });
+        Atomics.store(brokerI32, si, STATE.COMPLETED);
+        Atomics.notify(brokerI32, si, 1);
+        // Idle-kick: the completed syscall may have made a task runnable.
+        kickIdle("syscall_complete");
+      };
+
+      // ---- broker pump: registry-bound dispatch --------------------------
+      /** Transport-level rejection for requests with no live registry-bound
+       * task: distinct from a fabricated Linux return; the syscall never ran. */
+      const rejectStaleRequest = (slot: number): void => {
+        Atomics.add(brokerU32, OFF.STALE_TASK_REQUEST_COUNT, 1);
+        Atomics.store(brokerI32, idx(slot, S.RESULT), -1);
+        Atomics.store(brokerI32, idx(slot, S.ERRNO), 3 /* ESRCH */);
+        Atomics.store(
+          brokerU32,
+          idx(slot, S.RESP_ID),
+          Atomics.load(brokerU32, idx(slot, S.REQ_ID)),
+        );
+        Atomics.store(
+          brokerU32,
+          idx(slot, S.RESP_GENERATION),
+          Atomics.load(brokerU32, idx(slot, S.GENERATION)),
+        );
+        Atomics.store(brokerI32, idx(slot, S.KERNEL_PID), 0);
+        Atomics.store(brokerI32, idx(slot, S.KERNEL_TGID), 0);
+        Atomics.store(brokerU32, idx(slot, S.KERNEL_GENERATION), 0);
+        Atomics.store(brokerI32, idx(slot, S.STATE), STATE.COMPLETED);
+        Atomics.notify(brokerI32, idx(slot, S.STATE), 1);
+      };
+
+      const pumpBroker = (): void => {
+        if (!promisingKwaSyscall) return; // boot not finished; no user tasks yet
+        if (pumpRunning) {
+          pumpQueued = true;
+          return;
+        }
+        pumpRunning = true;
+        try {
+          for (;;) {
+            let dispatched = false;
+            for (let s = 0; s < N_SLOTS; ++s) {
+              const si = idx(s, S.STATE);
+              if (Atomics.load(brokerI32, si) !== STATE.REQUESTED) continue;
+              const workerId = Atomics.load(brokerU32, idx(s, S.WORKER_ID));
+              // Registry-bound dispatch: the triggering worker's
+              // authority-assigned workerId maps to exactly one kernel task.
+              const boundToken = workerIdToTask.get(workerId);
+              const bodyTaskId = Atomics.load(brokerI32, idx(s, S.TASK_ID));
+              if (
+                boundToken === undefined ||
+                !tasks.has(boundToken) ||
+                (bodyTaskId !== 0 && bodyTaskId !== boundToken)
+              ) {
+                if (boundToken !== undefined && bodyTaskId !== 0 && bodyTaskId !== boundToken) {
+                  Atomics.add(brokerU32, OFF.STALE_TASK_REQUEST_COUNT, 1);
+                }
+                rejectStaleRequest(s);
+                continue;
+              }
+              if (
+                Atomics.compareExchange(brokerI32, si, STATE.REQUESTED, STATE.CLAIMED) !==
+                STATE.REQUESTED
+              ) {
+                continue;
+              }
+              const dispatchId = nextDispatchId++;
+              const nr = Atomics.load(brokerU32, idx(s, S.NR));
+              const a0 = Atomics.load(brokerI32, idx(s, S.A0));
+              const a1 = Atomics.load(brokerI32, idx(s, S.A1));
+              const a2 = Atomics.load(brokerI32, idx(s, S.A2));
+              const a3 = Atomics.load(brokerI32, idx(s, S.A3));
+              const a4 = Atomics.load(brokerI32, idx(s, S.A4));
+              const a5 = Atomics.load(brokerI32, idx(s, S.A5));
+              pendingDispatch.set(dispatchId, {
+                slot: s,
+                taskToken: boundToken,
+                workerId,
+                clientReqId: Atomics.load(brokerU32, idx(s, S.REQ_ID)),
+                slotGen: Atomics.load(brokerU32, idx(s, S.GENERATION)),
+                nr,
+              });
+              dispatched = true;
+              postK5Diag("BROKER_DISPATCH", true, {
+                slot: s,
+                dispatchId,
+                taskToken: boundToken,
+                nr,
+              });
+              // Launched, not awaited: the bridge may park (parent waits while
+              // the child runs) — multiple parked stacks, one executing at a
+              // time, exactly the shared C ABI model. During execution C
+              // re-binds identity; user.* attribution reads executingTask.
+              executingTask = boundToken;
+              const p = promisingKwaSyscall(
+                boundToken, nr, a0, a1, a2, a3, a4, a5, dispatchId,
+              ) as Promise<number>;
+              p.then(() => {
+                // KernelContext: the bridge returns -ENOSYS WITHOUT
+                // syscall_complete when token validation fails. A settled
+                // bridge with no completion for this dispatchId = kernel
+                // rejection: cancel the slot loudly, never a fabricated
+                // Linux result.
+                const pd = pendingDispatch.get(dispatchId);
+                if (!pd) return;
+                pendingDispatch.delete(dispatchId);
+                Atomics.add(brokerU32, OFF.STALE_TASK_REQUEST_COUNT, 1);
+                const psi = idx(pd.slot, S.STATE);
+                if (Atomics.load(brokerI32, psi) === STATE.CLAIMED) {
+                  Atomics.store(brokerI32, psi, STATE.FREE);
+                  Atomics.store(brokerU32, idx(pd.slot, S.OWNER), 0);
+                  Atomics.notify(brokerI32, psi, 1);
+                }
+                postK5Diag("BRIDGE_REJECTED_TASK_TOKEN", false, {
+                  slot: pd.slot,
+                  dispatchId,
+                  taskToken: pd.taskToken,
+                });
+              }).catch((error: unknown) => {
+                const pd = pendingDispatch.get(dispatchId);
+                pendingDispatch.delete(dispatchId);
+                if (error === HALT_KERNEL || error === TERMINAL_TASK_EXIT) {
+                  return; // terminal cancellation owned by finishTask
+                }
+                Atomics.add(brokerU32, OFF.BROKER_ERRORS, 1);
+                postK5Diag("BROKER_DISPATCH_FAILED", false, {
+                  slot: pd?.slot ?? s,
+                  dispatchId,
+                  errorName: error instanceof Error ? error.name : "unknown",
+                  message: String(
+                    error instanceof Error ? error.message : error,
+                  ).slice(0, 300),
+                });
+                if (pd) {
+                  const psi = idx(pd.slot, S.STATE);
+                  if (Atomics.load(brokerI32, psi) === STATE.CLAIMED) {
+                    Atomics.store(brokerI32, psi, STATE.FREE);
+                    Atomics.store(brokerU32, idx(pd.slot, S.OWNER), 0);
+                    Atomics.notify(brokerI32, psi, 1);
+                  }
+                }
+              });
+            }
+            if (!dispatched) break;
+          }
+        } finally {
+          pumpRunning = false;
+          if (pumpQueued) {
+            pumpQueued = false;
+            queueMicrotask(pumpBroker);
+          }
+        }
+      };
+
+      // ---- pure user worker spawn (production path via main) -------------
+      const spawnUserWorker = (t: TaskRecord): void => {
+        if (!t.userModule || !t.userMemory) {
+          throw new Error(
+            `[K5] user.call before compile/instantiate for ${t.name}`,
+          );
+        }
+        const workerId = nextUserWorkerId++;
+        t.userWorkerId = workerId;
+        workerIdToTask.set(workerId, t.token);
+        postK5Diag("USER_WORKER_SPAWNED", true, {
+          taskToken: t.token,
+          workerId,
+          name: t.name,
+          mode: t.entryMode,
+          forkPid: t.forkPid !== 0 ? t.forkPid : null,
+          guestFn: t.guestFn,
+          guestArg: t.guestArg,
+          sharedMemory: true,
+          // Shared guest VAS: the generic Node adapter observes real guest
+          // result buffers (magic/pid words) directly through this object.
+          userMemory: t.userMemory,
+        });
+        postMessage({
+          type: "spawn_worker",
+          fn: t.guestFn,
+          arg: t.guestArg,
+          name: t.name,
+          user_module: t.userModule,
+          user_memory: t.userMemory,
+          taskToken: t.token,
+          workerId,
+          mode: t.entryMode,
+          forkPid: t.forkPid !== 0 ? t.forkPid : undefined,
+        } as WorkerMessage);
+      };
+
+      const handlers = {
+        ping() {
+          postK5Diag("K5A_PONG", true, {
+            bootReturned,
+            parked: suspensions.size,
+            tasks: tasks.size,
+          });
+        },
+        kick() {
+          pumpBroker();
+        },
+        forkCopied(pid: number) {
+          if (!instance) return;
+          const promisingForkCopied = wasmJspi.promising!(
+            instance.exports.fork_copied as (pid: number) => void,
+          );
+          promisingForkCopied(pid)
+            .then(() => {
+              postK5Diag("FORK_ACK_DELIVERED", true, { pid });
+              // Idle-kick: the woken cloner may now be runnable.
+              kickIdle("fork_copied");
+            })
+            .catch((error: unknown) => {
+              postK5Diag("FORK_ACK_FAILED", false, {
+                pid,
+                message: String(error instanceof Error ? error.message : error).slice(0, 200),
+              });
+            });
+        },
+        irq(cpu: number, irq: number) {
+          if (!instance) return;
+          const promisingIrq = wasmJspi.promising!(
+            instance.exports.trigger_irq_for_cpu as (
+              cpu: number,
+              irq: number,
+            ) => void,
+          );
+          promisingIrq(cpu, irq)
+            .then(() => {
+              wakeAllSuspensions(`irq:${irq}`);
+            })
+            .catch((error: unknown) => {
+              postK5Diag("IRQ_DELIVERY_FAILED", false, {
+                cpu,
+                irq,
+                message: String(error instanceof Error ? error.message : error).slice(0, 200),
+              });
+            });
+        },
+        virtioResult(seq: number, ok: boolean, value: number) {
+          const pending = virtioPending.get(seq);
+          if (!pending) {
+            postK5Diag("VIRTIO_RESULT_UNATTRIBUTED", false, { seq });
+            return;
+          }
+          virtioPending.delete(seq);
+          if (ok) pending.resolve(value);
+          else pending.reject(new Error(`virtio op failed (seq=${seq})`));
+        },
+        userTaskError(taskToken: number, reason: string) {
+          const t = tasks.get(taskToken);
+          if (!t?.pendingCall) {
+            postK5Diag("USER_TASK_ERROR_UNBOUND", false, { taskToken, reason });
+            return;
+          }
+          const pc = t.pendingCall;
+          t.pendingCall = null;
+          pc.reject(new Error(`user image failed: ${reason}`));
+        },
+      };
+      authorityHandlers = handlers;
+
+      // Kernel linear memory view for user.read/write/write_zeroes.
+      const kernelMem = new Uint8Array(memory.buffer);
+
+      const currentTask = (): TaskRecord => {
+        const t = tasks.get(executingTask);
+        if (!t) {
+          throw new Error(
+            `[K5] user.* import outside task context (executingTask=${executingTask})`,
+          );
+        }
+        return t;
+      };
+
+      const userCall = (): Promise<void> => {
+        const t = currentTask();
+        if (!t.userModule || !t.userMemory) {
+          throw new Error(
+            `[K5] user.call before compile/instantiate for ${t.name}`,
+          );
+        }
+        // Exec re-entry: the C wrapper invokes the newly committed image on
+        // this task's exec continuation. A successful exec NEVER returns into
+        // the old image — reject its pending frame with the typed sentinel
+        // (NOT a resolve: C must never treat the old frame as having
+        // returned, and the Linux task does NOT die here) and retire its old
+        // worker. finish_task remains the ONLY real-death path.
+        if (t.pendingCall) {
+          const prev = t.pendingCall;
+          t.pendingCall = null;
+          prev.reject(USER_IMAGE_REPLACED);
+        }
+        if (t.userWorker) {
+          try {
+            t.userWorker.terminate();
+          } catch {
+            /* already gone */
+          }
+          t.userWorker = null;
+          if (t.userWorkerId !== 0) workerIdToTask.delete(t.userWorkerId);
+          t.userWorkerId = 0;
+        }
+        const promise = new Promise<void>((resolve, reject) => {
+          t.pendingCall = { resolve, reject };
+        });
+        spawnUserWorker(t);
+        return promise;
+      };
+
+      const virtioCall = (
+        dev: number,
+        op: VirtioOp,
+        args: number[],
+        features?: bigint,
+      ): Promise<number> => {
+        const seq = nextVirtioSeq++;
+        return new Promise<number>((resolve, reject) => {
+          virtioPending.set(seq, { resolve, reject });
+          postMessage({ type: "virtio_cmd", seq, dev, op, args, features });
+        });
+      };
+
+      const SuspendingCtor = wasmJspi.Suspending!;
+
+      const authorityImports = {
+        env: { memory },
+        boot: {
+          get_devicetree: (buf: number, size: number) => {
+            if (!devicetree) {
+              throw new Error(
+                "[K5A] kernel requested devicetree but InitMessage.devicetree is missing",
+              );
+            }
+            if (size < devicetree.byteLength) {
+              throw new Error(
+                `[K5A] devicetree ${devicetree.byteLength}B exceeds kernel buffer ${size}B (setup.c bound)`,
+              );
+            }
+            new Uint8Array(memory.buffer).set(devicetree, buf);
+          },
+          get_initramfs: (buf: number, size: number): number => {
+            if (!initramfs) return 0;
+            if (size < initramfs.byteLength) {
+              throw new Error(
+                `[K5A] initramfs ${initramfs.byteLength}B exceeds kernel buffer ${size}B (setup.c bound)`,
+              );
+            }
+            new Uint8Array(memory.buffer).set(initramfs, buf);
+            return initramfs.byteLength;
+          },
+        },
+        kernel: kernel_imports({
+          is_worker: true,
+          memory,
+          onKernelYield,
+          onFinishTask: finishTask,
+          onSyscallComplete,
+          onHaltWorker,
+          spawnWorkerRaw(fn, arg, name, spawnFlags, taskToken) {
+            // Registration ONLY for normal tasks: continuations start when
+            // the kernel names the token as nextTask — never on spawn.
+            // token==0 is the boot task: registered now, started when
+            // exports.boot returns (shareUserMemory=0 there, never decoded
+            // as autostart). KWA_SF_AUTOSTART (bit1 0x2, KernelContext):
+            // secondary-idle spawns start kwa_task_entry immediately; idle
+            // tasks get no user worker and no workerId binding.
+            if (tasks.has(taskToken)) {
+              throw new Error(
+                `[K5] duplicate kernel taskToken ${taskToken} for ${name}`,
+              );
+            }
+            tasks.set(taskToken, {
+              token: taskToken,
+              name,
+              kernelFn: fn,
+              kernelArg: arg,
+              state: "registered",
+              userModule: null,
+              userMemory: null,
+              entryMode: "start",
+              guestFn: 0,
+              guestArg: 0,
+              forkPid: 0,
+              inheritFrom: executingTask,
+              userWorker: null,
+              userWorkerId: 0,
+              pendingCall: null,
+            });
+            postK5Diag("TASK_REGISTERED", true, {
+              taskToken,
+              name,
+              fn,
+              arg,
+              inheritFrom: executingTask,
+            });
+            if (taskToken !== 0 && (spawnFlags & 0x2) !== 0) {
+              const idleTask = tasks.get(taskToken)!;
+              postK5Diag("TASK_AUTOSTART", true, { taskToken, name });
+              const prevExecuting = executingTask;
+              startTask(idleTask);
+              // The spawning continuation keeps attribution; the idle stack
+              // re-binds executingTask when it actually resumes.
+              executingTask = prevExecuting;
+            }
+          },
+          boot_console_write(message) {
+            postMessage({ type: "boot_console_write", message });
+          },
+          boot_console_close() {
+            postMessage({ type: "boot_console_close" });
+          },
+          run_on_main(fn, arg) {
+            if (!instance) {
+              throw new Error("[K5A] run_on_main before kernel instance");
+            }
+            const table = instance.exports.__indirect_function_table;
+            if (!(table instanceof WebAssembly.Table)) {
+              throw new Error("[K5A] run_on_main: kernel function table missing");
+            }
+            const tableEntry = table.get(fn);
+            if (typeof tableEntry !== "function") {
+              throw new Error(`[K5A] run_on_main fn=${fn} not found`);
+            }
+            const entryFn = tableEntry as (a: number) => unknown;
+            entryFn(arg);
+          },
+          get_user_module: () => currentTask().userModule,
+          get_user_memory: () => currentTask().userMemory,
+        }),
+        user: {
+          compile(buf: number, size: number): number {
+            const t = currentTask();
+            const bytes = new Uint8Array(kernelMem.slice(buf, buf + size));
+            try {
+              t.userModule = new WebAssembly.Module(bytes);
+              return 0;
+            } catch {
+              return -8; // exec format error
+            }
+          },
+          instantiate(fresh_memory: number): void {
+            const t = currentTask();
+            if (!t.userModule) {
+              throw new Error("[K5] user.instantiate before user.compile");
+            }
+            if (fresh_memory || !t.userMemory) {
+              // Fresh VAS: exec commits a new image; keep the long-standing
+              // 768MiB floor (blink heap) — guests declaring smaller minimums
+              // accept larger memories up to their 2GiB maximum.
+              t.userMemory = new WebAssembly.Memory({
+                initial: 12288,
+                maximum: 32768,
+                shared: true,
+              });
+              // A REAL exec never returns into the old image's entry context:
+              // reset to the fresh image's own entrypoint (mode start, table
+              // entry 0/_start). Inherited clone context (switch_entry fn,
+              // fork_user pid) applies ONLY to non-fresh clone-path image
+              // binding — fresh=false preserves it untouched. No guest
+              // special-casing, no table-length assumptions.
+              t.entryMode = "start";
+              t.guestFn = 0;
+              t.guestArg = 0;
+              t.forkPid = 0;
+            }
+          },
+          // The kernel parks INSIDE this import while the pure user worker
+          // runs the guest — real suspension via JSPI.
+          call: new SuspendingCtor(userCall) as WebAssembly.ImportValue,
+          switch_entry(fn: number, arg: number): void {
+            const t = currentTask();
+            const parent = tasks.get(t.inheritFrom);
+            if (!parent?.userModule || !parent?.userMemory) {
+              throw new Error(
+                `[K5] switch_entry without parent image for ${t.name}`,
+              );
+            }
+            // CLONE_VM: the child shares the parent's guest VAS.
+            t.userModule = parent.userModule;
+            t.userMemory = parent.userMemory;
+            t.entryMode = "switch_entry";
+            t.guestFn = fn;
+            t.guestArg = arg;
+          },
+          fork_user(pid: number): void {
+            const t = currentTask();
+            const parent = tasks.get(t.inheritFrom);
+            if (!parent?.userModule || !parent?.userMemory) {
+              throw new Error(
+                `[K5] fork_user without parent image for ${t.name}`,
+              );
+            }
+            // Fresh child VAS seeded from the parent at the fork point — the
+            // parent is parked in its bounded fork-ack yield during the copy.
+            const parentPages = Math.ceil(
+              parent.userMemory.buffer.byteLength / 65536,
+            );
+            const fresh = new WebAssembly.Memory({
+              initial: Math.max(parentPages, 1),
+              maximum: 32768,
+              shared: true,
+            });
+            new Uint8Array(fresh.buffer).set(
+              new Uint8Array(parent.userMemory.buffer),
+            );
+            t.userModule = parent.userModule;
+            t.userMemory = fresh;
+            t.entryMode = "fork_user";
+            t.forkPid = pid;
+            // Guest entry recorded from the clone request that created us.
+          },
+          call_signal_handler(fn: number, sig: number): void {
+            // Guest signal handlers execute only inside their user worker;
+            // the K5 lifecycle scope has no delivery path — say so loudly.
+            postK5Diag("SIGNAL_HANDLER_DEFERRED", false, {
+              taskToken: currentTask().token,
+              fn,
+              sig,
+            });
+          },
+          read(to: number, from: number, n: number): number {
+            const t = currentTask();
+            if (!t.userMemory) throw new Error("[K5] user.read before instantiate");
+            const slice = new Uint8Array(t.userMemory.buffer, from, n);
+            kernelMem.set(slice, to);
+            return n - slice.length;
+          },
+          write(to: number, from: number, n: number): number {
+            const t = currentTask();
+            if (!t.userMemory) throw new Error("[K5] user.write before instantiate");
+            const slice = kernelMem.subarray(from, from + n);
+            new Uint8Array(t.userMemory.buffer, to, n).set(slice);
+            return n - slice.length;
+          },
+          write_zeroes(to: number, n: number): number {
+            const t = currentTask();
+            if (!t.userMemory) {
+              throw new Error("[K5] user.write_zeroes before instantiate");
+            }
+            new Uint8Array(t.userMemory.buffer, to, n).fill(0);
+            return 0;
+          },
+        },
+        virtio: {
+          // Suspending round-trips to main: devices live in the main process;
+          // the kernel continuation parks until the device op completes.
+          set_features: new SuspendingCtor(
+            (dev: number, features: bigint) =>
+              virtioCall(dev, "set_features", [], features),
+          ) as WebAssembly.ImportValue,
+          setup: new SuspendingCtor(
+            (
+              dev: number,
+              irq: number,
+              is_config_addr: number,
+              is_vring_addr: number,
+              config_addr: number,
+              config_len: number,
+            ) =>
+              virtioCall(dev, "setup", [
+                irq,
+                is_config_addr,
+                is_vring_addr,
+                config_addr,
+                config_len,
+              ]),
+          ) as WebAssembly.ImportValue,
+          enable_vring: new SuspendingCtor(
+            (dev: number, vq: number, size: number, desc_addr: number) =>
+              virtioCall(dev, "enable_vring", [vq, size, desc_addr]),
+          ) as WebAssembly.ImportValue,
+          disable_vring: new SuspendingCtor(
+            (dev: number, vq: number) =>
+              virtioCall(dev, "disable_vring", [vq]),
+          ) as WebAssembly.ImportValue,
+          notify: new SuspendingCtor(
+            (dev: number, vq: number) => virtioCall(dev, "notify", [vq]),
+          ) as WebAssembly.ImportValue,
+        },
+      } satisfies Imports;
+
+      currentStage = "AFTER_KERNEL_IMPORTS";
+      postK4Diag("AFTER_KERNEL_IMPORTS", { isKernelAuthority: true });
+
+      currentStage = "BEFORE_ENTRYPOINT";
+      instance = new WebAssembly.Instance(kernelModule, authorityImports);
+      postK5Diag("KERNEL_INSTANTIATED", true, { instanceCount: 1 });
+
+      // K5 per-task syscall bridge — REQUIRED. The naked syscall export stays
+      // untouched for standalone K1/K2/K4 witnesses, but the authority never
+      // invokes it: every brokered syscall runs under real task binding.
+      const bridgeExport: unknown = instance.exports.kwa_syscall_for_task;
+      if (typeof bridgeExport !== "function") {
+        postK5Diag("FATAL", false, { code: "KWA_BRIDGE_EXPORT_MISSING" });
+        throw new Error("[K5] vmlinux exports.kwa_syscall_for_task missing");
+      }
+      promisingKwaSyscall = wasmJspi.promising!(
+        bridgeExport as (...args: unknown[]) => unknown,
+      ) as (...args: number[]) => Promise<number>;
+
+      const bootExport: unknown = instance.exports.boot;
+      if (typeof bootExport !== "function") {
+        postK5Diag("FATAL", false, { code: "BOOT_EXPORT_MISSING" });
+        throw new Error("[K5A] vmlinux exports.boot missing");
+      }
+      const bootFn = bootExport as () => unknown;
+      const promisingBoot = wasmJspi.promising!(bootFn);
+      postK5Diag("BOOT_STARTED", true, { entry: "exports.boot" });
+      const bootPromise = promisingBoot() as Promise<void>;
+      bootPromise
+        .then(() => {
+          bootReturned = true;
+          postK5Diag("BOOT_RETURNED", true, {
+            parked: suspensions.size,
+            tasks: tasks.size,
+          });
+          // KernelContext: token==0 (boot task) starts when boot returns.
+          const bootTask = tasks.get(0);
+          if (!bootTask || bootTask.state !== "registered") {
+            throw new Error("[K5] kernel did not register its boot task");
+          }
+          startTask(bootTask);
+          maybeQuiesce("boot_returned");
+        })
+        .catch((error: unknown) => {
+          postK5Diag("FATAL", false, {
+            code: "BOOT_REJECTED",
+            errorName: error instanceof Error ? error.name : "unknown",
+            message:
+              String(error instanceof Error ? error.message : error).slice(
+                0,
+                300,
+              ),
+          });
+          signalWorkerDone("authority_boot_rejected");
+        });
+      return; // authority worker stays alive servicing kicks/irq/virtio/fork
+    }
+
+    // K3/K4: Secondary workers MUST NOT instantiate vmlinux.
+    // Instantiate ONLY the user module; route all syscalls through broker SAB.
+    if (!parent_user_module || !parent_user_memory) {
+      throw new Error("[K4] secondary worker missing user module/memory");
+    }
 
  // K4 DIAG: Memory identity verification before user_imports
  currentStage = "MEMORY_IDENTITY";
@@ -586,6 +1922,7 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
  parent_tls_base: parent_tls_base ?? 0,
  brokerSab,
  workerId,
+ taskToken,
  });
  currentStage = "AFTER_USER_IMPORTS";
  postK4Diag("AFTER_USER_IMPORTS", { hasUserImports: !!user.imports, hasModule: !!user.module, hasMemory: !!user.memory });
@@ -674,16 +2011,64 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
  postK4Diag("AFTER_USER_INSTANTIATE", { exportNames: Object.keys(userInstance.exports) });
  try {
  currentStage = "BEFORE_ENTRYPOINT";
- const table = (userInstance.exports as Record<string, unknown>).__indirect_function_table;
- if (table instanceof WebAssembly.Table) {
+ const exportsRec = userInstance.exports as Record<string, unknown>;
+ const table = exportsRec.__indirect_function_table;
+ const resolveTableEntry = (): ((a: number) => unknown) | null => {
+ if (!(table instanceof WebAssembly.Table)) return null;
  const entry = table.get(fn);
+ return typeof entry === "function" ? (entry as (a: number) => unknown) : null;
+ };
+ try {
+ if (mode === "fork_user") {
+ // K5 fork child: ack the completed VAS snapshot BEFORE resuming, so the
+ // parked parent's bounded fork-ack yield observes it in time.
+ postMessage({ type: "fork_copied", pid: forkPid ?? 0, taskToken: taskToken ?? 0 });
+ currentStage = "BEFORE_ENTRYPOINT_CALL";
+ postK4Diag("BEFORE_ENTRYPOINT_CALL", { fn, arg, mode });
+ const blinkResume = exportsRec.blink_user_fork_resume;
+ if (typeof blinkResume === "function") {
+ (blinkResume as () => number)();
+ throw new Error("blink_user_fork_resume returned; fork child must exit via kernel");
+ }
+ const entry = resolveTableEntry();
+ if (!entry) throw new Error(`[K5] fork_user entry fn=${fn} not found`);
+ entry(arg);
+ console.warn("fork child entrypoint returned without exiting");
+ } else {
+ const entry = resolveTableEntry();
+ if (entry) {
  currentStage = "ENTRYPOINT_FOUND";
- postK4Diag("ENTRYPOINT_FOUND", { fn, entryType: typeof entry, entryLength: (entry as Function)?.length });
- if (typeof entry === "function") {
+ postK4Diag("ENTRYPOINT_FOUND", { fn, entryType: "function" });
  currentStage = "BEFORE_ENTRYPOINT_CALL";
  postK4Diag("BEFORE_ENTRYPOINT_CALL", { fn, arg });
  entry(arg);
+ } else {
+ // K5: minimal WAT guests export _start(param i32); table may be absent.
+ const startExport = exportsRec._start;
+ if (typeof startExport !== "function") {
+ throw new Error(`[K5] no entrypoint: fn=${fn}, no table entry, no _start export`);
  }
+ currentStage = "BEFORE_ENTRYPOINT_CALL";
+ postK4Diag("BEFORE_ENTRYPOINT_CALL", { fn: "_start", arg, via: "_start_export" });
+ (startExport as (arg: number) => void)(0);
+ }
+ }
+ } catch (entryError) {
+ // K5: task-bound user workers report the real failure to the authority;
+ // the kernel continuation rejects with it (never a fabricated result).
+ if (taskToken) {
+ try {
+ postMessage({ type: "user_task_error", taskToken, reason: String((entryError as Error)?.message ?? entryError).slice(0, 300) });
+ } catch { /* best-effort */ }
+ }
+ throw entryError;
+ }
+ if (taskToken) {
+ // K5: a guest entrypoint that returns normally without exiting the task is
+ // an abnormal end for that task's user image.
+ try {
+ postMessage({ type: "user_task_error", taskToken, reason: "entrypoint_returned_without_exit" });
+ } catch { /* best-effort */ }
  }
  signalWorkerDone("entrypoint_returned");
  } catch (error) {

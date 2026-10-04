@@ -33,6 +33,10 @@ export const SLOTS_OFF = 64;
 
 export const OFF = {
   MAGIC: 0,
+  /** K5: completion had no matching pending dispatch — result dropped, never faked. */
+  UNATTRIBUTED_RESPONSE_COUNT: 1,
+  /** K5: finish_task terminal cancellations of outstanding claimed slots. */
+  TERMINAL_CANCEL_COUNT: 2,
   BOOT_COUNT: 8,
   SECONDARY_INST_COUNT: 9,
   POST_FREE_DISPATCH_COUNT: 10,
@@ -65,6 +69,10 @@ export const S = {
   KERNEL_PID: 72,
   KERNEL_TGID: 76,
   KERNEL_GENERATION: 80,
+  /** K5: echo of the client's slot GENERATION snapshot at CLAIM time.
+   * Consumer requires RESP_GENERATION === its local reservation generation
+   * (ABA/stale-slot guard), alongside KERNEL_GENERATION kernel truth. */
+  RESP_GENERATION: 84,
 } as const;
 
 export const idx = (slot: number, off: number): number =>
@@ -121,11 +129,20 @@ export class BrokerClient {
   readonly #workerId: number;
   #reqSeq = 1;
   #slotGen = new Uint32Array(N_SLOTS);
+  /** K5: highest C-stamped KERNEL_GENERATION accepted by this client.
+   * Responses with zero or non-increasing kernel generation are replays. */
+  #lastKernelGen = 0;
 
   constructor(sab: SharedArrayBuffer, workerId: number) {
     this.#i32 = new Int32Array(sab);
     this.#u32 = new Uint32Array(sab);
     this.#workerId = workerId;
+  }
+
+  #freeRejectedSlot(si: number, slot: number): void {
+    Atomics.store(this.#i32, si, STATE.FREE);
+    Atomics.store(this.#u32, idx(slot, S.OWNER), 0);
+    Atomics.notify(this.#i32, si, 1);
   }
 
   syscall(
@@ -216,6 +233,7 @@ export class BrokerClient {
     const rKernelPid = Atomics.load(this.#i32, idx(slot, S.KERNEL_PID));
     const rKernelTgid = Atomics.load(this.#i32, idx(slot, S.KERNEL_TGID));
     const rKernelGen = Atomics.load(this.#u32, idx(slot, S.KERNEL_GENERATION));
+    const rRespGen = Atomics.load(this.#u32, idx(slot, S.RESP_GENERATION));
 
     // K2: Validate kernel-authoritative identity
     // Caller-supplied taskId/tid are NON-AUTHORITATIVE; kernel truth wins.
@@ -231,15 +249,32 @@ export class BrokerClient {
       Atomics.notify(this.#i32, si, 1);
       return { result: -1, errno: 38, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
     }
-    // K2R: Fail-closed generation check — stale or zero generation is rejected
-    const expectedGen = this.#slotGen[slot];
-    if (rKernelGen === 0 || rKernelGen !== expectedGen) {
-      Atomics.add(this.#u32, OFF.STALE_TASK_REQUEST_COUNT, 1);
+    // K5: RESP_GENERATION must echo this client's reservation generation for
+    // this exact slot use (ABA/stale-slot guard across slot reuse).
+    if (rRespGen !== (this.#slotGen[slot] ?? 0)) {
+      Atomics.add(this.#u32, OFF.ABA_REJECT_COUNT, 1);
       Atomics.store(this.#i32, si, STATE.FREE);
       Atomics.store(this.#u32, idx(slot, S.OWNER), 0);
       Atomics.notify(this.#i32, si, 1);
       return { result: -1, errno: 38, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
     }
+    // K5: KERNEL_GENERATION is C-stamped global monotonic kernel truth —
+    // zero (unstamped) or non-increasing (replayed) values are rejected,
+    // EXCEPT the authority's registry-dead transport rejection (-ESRCH):
+    // the syscall never ran, so this is a transport error, not a Linux
+    // result and never a fabricated status.
+    if (rKernelGen === 0) {
+      if (!(rResult === -1 && rErrno === 3)) {
+        Atomics.add(this.#u32, OFF.STALE_TASK_REQUEST_COUNT, 1);
+        this.#freeRejectedSlot(si, slot);
+        return { result: -1, errno: 38, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
+      }
+    } else if (rKernelGen <= this.#lastKernelGen) {
+      Atomics.add(this.#u32, OFF.STALE_TASK_REQUEST_COUNT, 1);
+      this.#freeRejectedSlot(si, slot);
+      return { result: -1, errno: 38, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
+    }
+    this.#lastKernelGen = rKernelGen;
 
     // 4. Consume and FREE
     if (Atomics.compareExchange(this.#i32, si, STATE.COMPLETED, STATE.CONSUMED) !== STATE.COMPLETED) {
@@ -328,6 +363,13 @@ export function authorityPump(
     Atomics.store(i32, idx(s, S.KERNEL_PID), kPid);
     Atomics.store(i32, idx(s, S.KERNEL_TGID), kTgid);
     Atomics.store(u32, idx(s, S.KERNEL_GENERATION), kGen);
+    // K5: Echo the client's slot GENERATION captured at CLAIM time so the
+    // consumer can enforce exact RESP_GENERATION matching (ABA/stale-slot).
+    Atomics.store(
+      u32,
+      idx(s, S.RESP_GENERATION),
+      Atomics.load(u32, idx(s, S.GENERATION)),
+    );
     Atomics.store(i32, si, STATE.COMPLETED);
     Atomics.notify(i32, si, 1);
     processed++;

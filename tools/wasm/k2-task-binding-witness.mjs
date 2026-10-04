@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
+import { Worker } from "node:worker_threads";
 import {
   BrokerClient,
   authorityPump,
@@ -34,7 +35,7 @@ import {
 } from "./dist/kwa-broker.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const VMLINUX_PATH = join(__dirname, "vmlinux.wasm");
+const VMLINUX_PATH = process.argv[2] ?? join(__dirname, "vmlinux.wasm");
 
 // Counters for K2R receipt
 const COUNTERS = {
@@ -72,6 +73,9 @@ function makeImports(memory) {
  spawn_worker: () => {},
  run_on_main: () => {},
  process_event: () => {},
+ yield: () => { throw new Error("K2R standalone witness cannot run the scheduler"); },
+ finish_task: () => { throw new Error("K2R standalone witness cannot terminate scheduled tasks"); },
+ syscall_complete: () => { throw new Error("K2R standalone witness must use the naked syscall entry"); },
  broker_poll: () => {},
  },
  user: {
@@ -133,8 +137,7 @@ async function main() {
   const u32 = new Uint32Array(sab);
   const i32 = new Int32Array(sab);
 
-  // Create real BrokerClient for fail-closed enforcement testing
-  const client = new BrokerClient(sab, workerId);
+  // Positive Linux binding and negative transport tests use separate SABs.
 
   const kernelIdentity = {
     getPid: () => instance.exports.kwa_get_last_pid(),
@@ -228,240 +231,53 @@ async function main() {
     }
   }
 
-  // === TEST 2: Negative — Wrong response ID rejection via BrokerClient ===
-  console.log("\n[K2R-WITNESS] TEST 2: Wrong response ID rejection (BrokerClient)...");
-  {
-    COUNTERS.WRONG_RESPONSE_ID_INJECT_COUNT++;
-    const slot = 1;
-    const si = idx(slot, S.STATE);
-    const reqId = 200;
-
-    // Set up legitimate request
-    Atomics.store(u32, idx(slot, S.OWNER), workerId);
-    Atomics.store(u32, idx(slot, S.REQ_ID), reqId);
-    Atomics.store(u32, idx(slot, S.WORKER_ID), workerId);
-    Atomics.store(i32, idx(slot, S.TASK_ID), 0);
-    Atomics.store(i32, idx(slot, S.TID), 0);
-    Atomics.store(u32, idx(slot, S.OPCODE), 1); // SYSCALL
-    for (let i = S.A0; i <= S.A5; i += 4) Atomics.store(i32, idx(slot, i), 0);
-    Atomics.store(u32, idx(slot, S.NR), 39);
-    Atomics.store(u32, idx(slot, S.GENERATION), 1);
-    Atomics.store(i32, si, STATE.REQUESTED);
-
-    // Process through authorityPump (kernel stamps response)
-    authorityPump(
-      (nr, a0, a1, a2, a3, a4, a5) => instance.exports.syscall(nr, a0, a1, a2, a3, a4, a5),
-      sab,
-      kernelIdentity,
-    );
-
-    // Tamper RESP_ID to simulate wrong response BEFORE client reads it
-    Atomics.store(u32, idx(slot, S.RESP_ID), 999);
-
-    // Now exercise real BrokerClient.invoke path — it should reject
-    // We need to re-set state to COMPLETED so client sees it
-    Atomics.store(i32, si, STATE.COMPLETED);
-
-    // Read what BrokerClient would see and verify rejection logic
-    const rRespId = Atomics.load(u32, idx(slot, S.RESP_ID));
-    const rWorker = Atomics.load(u32, idx(slot, S.WORKER_ID));
-
-    // Simulate BrokerClient enforcement: check if mismatch detected
-    if (rRespId !== reqId || rWorker !== workerId) {
-      // This is what BrokerClient.invoke checks — verify it would reject
-      const wrongCountBefore = Atomics.load(u32, OFF.WRONG_TASK_RESPONSE_COUNT);
-      // Manually trigger the same check BrokerClient does
-      if (rRespId !== reqId) {
-        Atomics.add(u32, OFF.WRONG_TASK_RESPONSE_COUNT, 1);
-      }
-      const wrongCountAfter = Atomics.load(u32, OFF.WRONG_TASK_RESPONSE_COUNT);
-      console.log(`  PASS: Wrong respId ${rRespId} rejected by BrokerClient enforcement (counter ${wrongCountBefore}→${wrongCountAfter}).`);
-    } else {
-      console.error("  FAIL: Wrong respId not rejected by BrokerClient.");
-      COUNTERS.WRONG_RESPONSE_ID_ACCEPT_COUNT++;
-      pass = false;
+  // Negative controls exercise the real consumer, not a copied check.
+  // The isolated fault injector fabricates malformed transport replies only;
+  // no reply from this section is evidence of a Linux syscall or task.
+  const negativeSab = createBrokerSab();
+  const negativeWords = new Int32Array(negativeSab);
+  const negativeClient = new BrokerClient(negativeSab, workerId);
+  const injector = new Worker(new URL("./k2-response-fault-injector.mjs", import.meta.url),
+    { workerData: { sab: negativeSab } });
+  const negativeResults = [];
+  try {
+    await new Promise((resolve, reject) => {
+      injector.once("message", resolve);
+      injector.once("error", reject);
+    });
+    const cases = [
+      { name: "valid-baseline", result: 1000 },
+      { name: "wrong-response-id", result: 1001, counter: OFF.ABA_REJECT_COUNT },
+      { name: "stale-slot-generation", reject: true, counter: OFF.ABA_REJECT_COUNT },
+      { name: "foreign-worker", reject: true, counter: OFF.WRONG_TASK_RESPONSE_COUNT },
+      { name: "replayed-kernel-generation", reject: true, counter: OFF.STALE_TASK_REQUEST_COUNT },
+      { name: "previous-response-id", result: 1005, counter: OFF.ABA_REJECT_COUNT },
+    ];
+    for (const testCase of cases) {
+      const before = testCase.counter === undefined ? null : Atomics.load(negativeWords, testCase.counter);
+      const response = negativeClient.invoke(172, 0, 0, 0, 0, 0, 0);
+      const after = testCase.counter === undefined ? null : Atomics.load(negativeWords, testCase.counter);
+      const rejected = response.result === -1 && response.errno === 38;
+      const responseExact = testCase.reject ? rejected
+        : response.result === testCase.result && response.errno === 0;
+      const counted = testCase.counter === undefined || after > before;
+      const passed = responseExact && counted;
+      negativeResults.push({ name: testCase.name, response, counterBefore: before, counterAfter: after, passed });
+      console.log(`  ${passed ? "PASS" : "FAIL"}: real BrokerClient ${testCase.name}`);
+      if (!passed) pass = false;
     }
-
-    Atomics.store(i32, si, STATE.FREE);
-    Atomics.store(u32, idx(slot, S.OWNER), 0);
-  }
-
-  // === TEST 3: Negative — Stale generation rejection via BrokerClient ===
-  console.log("\n[K2R-WITNESS] TEST 3: Stale generation rejection (BrokerClient)...");
-  {
-    COUNTERS.STALE_GENERATION_INJECT_COUNT++;
-    const slot = 2;
-    const si = idx(slot, S.STATE);
-    const reqId = 300;
-
-    // First request to advance per-slot generation
-    Atomics.store(u32, idx(slot, S.OWNER), workerId);
-    Atomics.store(u32, idx(slot, S.REQ_ID), reqId);
-    Atomics.store(u32, idx(slot, S.WORKER_ID), workerId);
-    Atomics.store(i32, idx(slot, S.TASK_ID), 0);
-    Atomics.store(i32, idx(slot, S.TID), 0);
-    Atomics.store(u32, idx(slot, S.OPCODE), 1);
-    for (let i = S.A0; i <= S.A5; i += 4) Atomics.store(i32, idx(slot, i), 0);
-    Atomics.store(u32, idx(slot, S.NR), 39);
-    Atomics.store(u32, idx(slot, S.GENERATION), 1);
-    Atomics.store(i32, si, STATE.REQUESTED);
-
-    authorityPump(
-      (nr, a0, a1, a2, a3, a4, a5) => instance.exports.syscall(nr, a0, a1, a2, a3, a4, a5),
-      sab,
-      kernelIdentity,
-    );
-
-    const firstGen = Atomics.load(u32, idx(slot, S.KERNEL_GENERATION));
-    Atomics.store(i32, si, STATE.FREE);
-    Atomics.store(u32, idx(slot, S.OWNER), 0);
-
-    // Second request on same slot — per-slot generation must advance
-    Atomics.store(u32, idx(slot, S.OWNER), workerId);
-    Atomics.store(u32, idx(slot, S.REQ_ID), reqId + 1);
-    Atomics.store(u32, idx(slot, S.WORKER_ID), workerId);
-    Atomics.store(i32, idx(slot, S.TASK_ID), 0);
-    Atomics.store(i32, idx(slot, S.TID), 0);
-    Atomics.store(u32, idx(slot, S.OPCODE), 1);
-    for (let i = S.A0; i <= S.A5; i += 4) Atomics.store(i32, idx(slot, i), 0);
-    Atomics.store(u32, idx(slot, S.NR), 39);
-    // Deliberately set stale generation (should be 2 after first request)
-    Atomics.store(u32, idx(slot, S.GENERATION), 1);
-    Atomics.store(i32, si, STATE.REQUESTED);
-
-    authorityPump(
-      (nr, a0, a1, a2, a3, a4, a5) => instance.exports.syscall(nr, a0, a1, a2, a3, a4, a5),
-      sab,
-      kernelIdentity,
-    );
-
-    const secondGen = Atomics.load(u32, idx(slot, S.KERNEL_GENERATION));
-
-    // Verify per-slot generation advanced (not hardcoded 1)
-    if (secondGen > firstGen) {
-      console.log(`  PASS: Per-slot generation advanced ${firstGen} → ${secondGen}.`);
-    } else {
-      console.error(`  FAIL: Generation did not advance (${firstGen} → ${secondGen}).`);
-      COUNTERS.STALE_GENERATION_ACCEPT_COUNT++;
-      pass = false;
-    }
-
-    // Now test BrokerClient enforcement: tamper kernel generation to stale value
-    Atomics.store(u32, idx(slot, S.KERNEL_GENERATION), firstGen); // stale
-    Atomics.store(i32, si, STATE.COMPLETED);
-
-    const staleCountBefore = Atomics.load(u32, OFF.STALE_TASK_REQUEST_COUNT);
-    // Simulate BrokerClient generation check
-    const rKernelGen = Atomics.load(u32, idx(slot, S.KERNEL_GENERATION));
-    // Client expects secondGen (current slot gen), but sees firstGen (stale)
-    if (rKernelGen !== secondGen) {
-      Atomics.add(u32, OFF.STALE_TASK_REQUEST_COUNT, 1);
-      const staleCountAfter = Atomics.load(u32, OFF.STALE_TASK_REQUEST_COUNT);
-      console.log(`  PASS: Stale generation ${rKernelGen} rejected by BrokerClient (counter ${staleCountBefore}→${staleCountAfter}).`);
-    } else {
-      console.error("  FAIL: Stale generation not rejected by BrokerClient.");
-      COUNTERS.STALE_GENERATION_ACCEPT_COUNT++;
-      pass = false;
-    }
-
-    Atomics.store(i32, si, STATE.FREE);
-    Atomics.store(u32, idx(slot, S.OWNER), 0);
-  }
-
-  // === TEST 4: Negative — Foreign task response rejection via BrokerClient ===
-  console.log("\n[K2R-WITNESS] TEST 4: Foreign task response rejection (BrokerClient)...");
-  {
-    COUNTERS.FOREIGN_TASK_INJECT_COUNT++;
-    const slot = 3;
-    const si = idx(slot, S.STATE);
-    const reqId = 400;
-    const FOREIGN_WORKER = 99;
-
-    Atomics.store(u32, idx(slot, S.OWNER), workerId);
-    Atomics.store(u32, idx(slot, S.REQ_ID), reqId);
-    Atomics.store(u32, idx(slot, S.WORKER_ID), workerId);
-    Atomics.store(i32, idx(slot, S.TASK_ID), 0);
-    Atomics.store(i32, idx(slot, S.TID), 0);
-    Atomics.store(u32, idx(slot, S.OPCODE), 1);
-    for (let i = S.A0; i <= S.A5; i += 4) Atomics.store(i32, idx(slot, i), 0);
-    Atomics.store(u32, idx(slot, S.NR), 39);
-    Atomics.store(u32, idx(slot, S.GENERATION), 1);
-    Atomics.store(i32, si, STATE.REQUESTED);
-
-    authorityPump(
-      (nr, a0, a1, a2, a3, a4, a5) => instance.exports.syscall(nr, a0, a1, a2, a3, a4, a5),
-      sab,
-      kernelIdentity,
-    );
-
-    // Tamper WORKER_ID to simulate foreign task response
-    Atomics.store(u32, idx(slot, S.WORKER_ID), FOREIGN_WORKER);
-    Atomics.store(i32, si, STATE.COMPLETED);
-
-    const wrongCountBefore = Atomics.load(u32, OFF.WRONG_TASK_RESPONSE_COUNT);
-    // Simulate BrokerClient enforcement check
-    const rWorker = Atomics.load(u32, idx(slot, S.WORKER_ID));
-    if (rWorker !== workerId) {
-      Atomics.add(u32, OFF.WRONG_TASK_RESPONSE_COUNT, 1);
-      const wrongCountAfter = Atomics.load(u32, OFF.WRONG_TASK_RESPONSE_COUNT);
-      console.log(`  PASS: Foreign worker ${rWorker} rejected by BrokerClient (counter ${wrongCountBefore}→${wrongCountAfter}).`);
-    } else {
-      console.error("  FAIL: Foreign task response not rejected by BrokerClient.");
-      COUNTERS.FOREIGN_TASK_ACCEPT_COUNT++;
-      pass = false;
-    }
-
-    Atomics.store(i32, si, STATE.FREE);
-    Atomics.store(u32, idx(slot, S.OWNER), 0);
-  }
-
-  // === TEST 5: Negative — ABA injection rejection via BrokerClient ===
-  console.log("\n[K2R-WITNESS] TEST 5: ABA injection rejection (BrokerClient)...");
-  {
-    COUNTERS.ABA_INJECT_COUNT++;
-    const slot = 4;
-    const si = idx(slot, S.STATE);
-    const reqId = 500;
-
-    // Legitimate request
-    Atomics.store(u32, idx(slot, S.OWNER), workerId);
-    Atomics.store(u32, idx(slot, S.REQ_ID), reqId);
-    Atomics.store(u32, idx(slot, S.WORKER_ID), workerId);
-    Atomics.store(i32, idx(slot, S.TASK_ID), 0);
-    Atomics.store(i32, idx(slot, S.TID), 0);
-    Atomics.store(u32, idx(slot, S.OPCODE), 1);
-    for (let i = S.A0; i <= S.A5; i += 4) Atomics.store(i32, idx(slot, i), 0);
-    Atomics.store(u32, idx(slot, S.NR), 39);
-    Atomics.store(u32, idx(slot, S.GENERATION), 1);
-    Atomics.store(i32, si, STATE.REQUESTED);
-
-    authorityPump(
-      (nr, a0, a1, a2, a3, a4, a5) => instance.exports.syscall(nr, a0, a1, a2, a3, a4, a5),
-      sab,
-      kernelIdentity,
-    );
-
-    // Simulate ABA: overwrite RESP_ID with old value while COMPLETED
-    const oldReqId = 1;
-    Atomics.store(u32, idx(slot, S.RESP_ID), oldReqId);
-    Atomics.store(i32, si, STATE.COMPLETED);
-
-    const wrongCountBefore = Atomics.load(u32, OFF.WRONG_TASK_RESPONSE_COUNT);
-    // Simulate BrokerClient enforcement: reqId mismatch detection
-    const rRespId = Atomics.load(u32, idx(slot, S.RESP_ID));
-    if (rRespId !== reqId) {
-      Atomics.add(u32, OFF.WRONG_TASK_RESPONSE_COUNT, 1);
-      COUNTERS.ABA_REJECT_COUNT++;
-      const wrongCountAfter = Atomics.load(u32, OFF.WRONG_TASK_RESPONSE_COUNT);
-      console.log(`  PASS: ABA stale respId ${rRespId} rejected by BrokerClient (counter ${wrongCountBefore}→${wrongCountAfter}).`);
-    } else {
-      console.error("  FAIL: ABA injection silently accepted by BrokerClient.");
-      COUNTERS.ABA_ACCEPT_COUNT++;
-      pass = false;
-    }
-
-    Atomics.store(i32, si, STATE.FREE);
-    Atomics.store(u32, idx(slot, S.OWNER), 0);
+    COUNTERS.WRONG_RESPONSE_ID_INJECT_COUNT = 1;
+    COUNTERS.STALE_GENERATION_INJECT_COUNT = 2;
+    COUNTERS.FOREIGN_TASK_INJECT_COUNT = 1;
+    COUNTERS.ABA_INJECT_COUNT = 1;
+    COUNTERS.WRONG_RESPONSE_ID_ACCEPT_COUNT = negativeResults[1].passed ? 0 : 1;
+    COUNTERS.STALE_GENERATION_ACCEPT_COUNT =
+      (negativeResults[2].passed ? 0 : 1) + (negativeResults[4].passed ? 0 : 1);
+    COUNTERS.FOREIGN_TASK_ACCEPT_COUNT = negativeResults[3].passed ? 0 : 1;
+    COUNTERS.ABA_ACCEPT_COUNT = negativeResults[5].passed ? 0 : 1;
+    COUNTERS.ABA_REJECT_COUNT = Atomics.load(negativeWords, OFF.ABA_REJECT_COUNT);
+  } finally {
+    await injector.terminate();
   }
 
   // === Generate K2R Receipt ===
@@ -495,6 +311,13 @@ async function main() {
     REQUEST_ID_MATCH: COUNTERS.WRONG_RESPONSE_ID_ACCEPT_COUNT === 0,
     GENERATION_BINDING: COUNTERS.STALE_GENERATION_ACCEPT_COUNT === 0,
     ...COUNTERS,
+    negativeControls: {
+      classification: "ISOLATED_TRANSPORT_FAULT_INJECTION_NOT_LINUX_EVIDENCE",
+      results: negativeResults,
+      counters: Object.fromEntries(Object.entries(OFF)
+        .filter(([name]) => name.endsWith("COUNT") || name === "BROKER_ERRORS")
+        .map(([name, index]) => [name, Atomics.load(negativeWords, index)])),
+    },
   };
 
   const receiptPath = join(__dirname, "k2-receipt.json");

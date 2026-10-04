@@ -2,8 +2,12 @@
 #include <linux/sched.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
+#include <asm/globals.h>
 #include <asm/process_events.h>
 #include <asm/wasm_imports.h>
+
+/* Bytes reserved below the park floor for each new syscall continuation. */
+#define KWA_SYSCALL_STACK_HEADROOM 1024
 
 #undef __SYSCALL
 #define __SYSCALL(nr, sym) asmlinkage long sym(const struct pt_regs *regs);
@@ -140,18 +144,155 @@ wasm_syscall(long nr, unsigned long arg0, unsigned long arg1,
 
 	ret = syscall_table[nr](regs);
 
-	/*
-	 * Observe wait4 only after Linux has returned from the real syscall path.
-	 * ret > 0 identifies the wait condition actually consumed; data0 is the
-	 * raw status Linux wrote to user memory. No event is emitted for WNOHANG
-	 * zero returns, errors, null status pointers, or failed status reads.
-	 */
+/*
+ * Observe wait4 only after Linux has returned from the real syscall path.
+ * ret > 0 identifies the wait condition actually consumed; data0 is the
+ * raw status Linux wrote to user memory. No event is emitted for WNOHANG
+ * zero returns, errors, null status pointers, or failed status reads.
+ */
 	if (nr == __NR_wait4 && ret > 0)
 		wasm_emit_wait4_reap_event(ret, arg1);
 
 	syscall_exit_to_user_mode(regs);
 	regs->user_mode = 1;
 
+	return ret;
+}
+
+/* K5: inner syscall body. Called ONLY from the kwa_syscall_for_task
+ * trampoline AFTER the task stack is adopted, so this entire C frame (and
+ * the identity locals it carries) is allocated below the task's stack top —
+ * never in a previous/parked task's stack region. */
+static noinline long
+kwa_syscall_inner(struct task_struct *task, struct thread_info *ti, long nr,
+		  unsigned long arg0, unsigned long arg1, unsigned long arg2,
+		  unsigned long arg3, unsigned long arg4, unsigned long arg5,
+		  u32 dispatch_id)
+{
+	/* C-owned identity capture at actual entry (K2/K5A evidence). These
+	 * locals live on the task's own kernel stack: immune to cross-task
+	 * overwrites of the diagnostic kwa_get_last_* globals while this
+	 * continuation parks inside a blocking clone/wait4. */
+	int pid = task->pid;
+	int tgid = task->tgid;
+	u32 generation = ++kwa_generation_counter;
+	long ret;
+
+	set_current_cpu(atomic_read(&ti->running_cpu));
+	set_current_task(task); /* publish: this task executes on cpu */
+
+	ret = wasm_syscall(nr, arg0, arg1, arg2, arg3, arg4, arg5);
+
+	/* Post-wait certification (event 10): a successful wait4 records the
+	 * real reaped child; the matching second wait4's ECHILD arms the
+	 * pending marker; ONLY a subsequent successful getpid (ret ==
+	 * own pid) certifies PARENT_POST_WAIT_SYSCALL. Bare ECHILD never
+	 * certifies anything. Flags are cleared after the emit. */
+	if (nr == __NR_wait4) {
+		if (ret > 0)
+			ti->k5_reaped_child = (int)ret;
+		else if (ret == -ECHILD && ti->k5_reaped_child != 0)
+			ti->k5_flags |= K5_KF_POSTWAIT_PENDING;
+	}
+	if (nr == __NR_getpid && ret == (long)task->pid &&
+	    (ti->k5_flags & K5_KF_POSTWAIT_PENDING)) {
+		u64 run_id_hi, run_id_lo;
+
+		zn_get_run_id(&run_id_hi, &run_id_lo);
+		wasm_kernel_process_event(
+			ZN_EVENT_PARENT_POST_WAIT_SYSCALL,
+			run_id_hi,
+			run_id_lo,
+			zn_get_next_event_seq(),
+			(u32)task->pid,        /* surviving waiter */
+			(u32)task->tgid,
+			task->real_parent ?
+				(u32)task->real_parent->pid : 0,
+			0,                     /* worker_id unused */
+			(u64)ret,              /* data0: post-wait getpid */
+			(u64)(u32)ti->k5_reaped_child, /* data1: reaped child */
+			"<post-wait>",
+			10
+		);
+		ti->k5_flags &= ~K5_KF_POSTWAIT_PENDING;
+		ti->k5_reaped_child = 0;
+	}
+
+	/* Image replacement ONLY for an actual successful execve/execveat
+	 * request carrying a fresh commit: the request itself exec'd (binfmt
+	 * set the flag during THIS dispatch) and returned success. Any other
+	 * syscall (e.g. an ordinary getpid) must never re-enter the image,
+	 * even if a stale flag existed. */
+	if ((nr == __NR_execve || nr == __NR_execveat) && ret == 0 &&
+	    (ti->k5_flags & K5_KF_EXEC_COMMITTED)) {
+		/* Successful execve has no Linux return: wrap into the newly
+		 * committed user image. No syscall_complete for this request —
+		 * its slot stays claimed until finish_task cancels it. The
+		 * new program inherits no post-wait state. */
+		ti->k5_flags &= ~K5_KF_EXEC_COMMITTED;
+		ti->k5_flags &= ~K5_KF_POSTWAIT_PENDING;
+		ti->k5_reaped_child = 0;
+		kwa_enter_user_image(task);
+	}
+
+	/* Completion identity comes from C locals stamped at entry, read after
+	 * the actual return — never from the shared diagnostics globals. */
+	wasm_kernel_syscall_complete(kwa_task_token(task), dispatch_id,
+				     (u32)ret, pid, tgid, generation);
+	return ret;
+}
+
+/* K5: per-task brokered syscall bridge. The host invokes this export via
+ * WebAssembly.promising — one fresh continuation per broker request — so it
+ * can park on the Linux scheduler (blocking clone/wait4) without occupying
+ * the authority context.
+ *
+ * TRAMPOLINE DISCIPLINE: scalar locals only, no address-taken storage — the
+ * compiler keeps them in wasm locals on THIS continuation's engine stack, so
+ * nothing is pinned in the previous (parked) task's linear stack region while
+ * we run or park. The stack is adopted BEFORE the noinline inner call, so the
+ * inner body's whole C frame lands on the task's own kernel stack. */
+__attribute__((export_name("kwa_syscall_for_task"))) long
+kwa_syscall_for_task(u32 task_token, long nr, unsigned long arg0,
+		     unsigned long arg1, unsigned long arg2,
+		     unsigned long arg3, unsigned long arg4,
+		     unsigned long arg5, u32 dispatch_id)
+{
+	struct task_struct *task;
+	struct thread_info *ti;
+	unsigned long old_floor, stack_top;
+	long ret;
+
+	task = kwa_task_validate_running(task_token, NULL);
+	if (!task) {
+		/* Fail closed and loud (also rejects unscheduled tasks:
+		 * running_cpu < 0 is Linux-scheduler-owned, never claimed
+		 * here). Return WITHOUT syscall_complete so the host cancels
+		 * the claimed slot instead of binding a result. */
+		pr_err("K5: kwa_syscall_for_task rejected token=%u nr=%ld\n",
+		       task_token, nr);
+		return -ENOSYS;
+	}
+	ti = task_thread_info(task);
+
+	old_floor = ti->k5_park_floor;
+	stack_top = old_floor - KWA_SYSCALL_STACK_HEADROOM;
+	if (stack_top <
+	    (unsigned long)task->stack + sizeof(struct pt_regs) + 512) {
+		pr_emerg("K5: task %d kernel stack exhausted (floor=%lx)\n",
+			 task->pid, ti->k5_park_floor);
+		BUG();
+	}
+	ti->k5_park_floor = stack_top;
+	set_stack_pointer((void *)stack_top);
+
+	ret = kwa_syscall_inner(task, ti, nr, arg0, arg1, arg2, arg3, arg4,
+				arg5, dispatch_id);
+
+	/* Ordinary return: this continuation completed, its frames are dead —
+	 * give the park floor back so sequential syscalls do not creep down
+	 * the stack. Exec/exit never reach this line. */
+	ti->k5_park_floor = old_floor;
 	return ret;
 }
 

@@ -72,6 +72,8 @@
 #include <linux/uaccess.h>
 #include <asm/unistd.h>
 #include <asm/mmu_context.h>
+#include <asm/process_events.h>
+#include <asm/wasm_imports.h>
 
 /*
  * The default value should be high enough to not crash a system that randomly
@@ -256,6 +258,28 @@ void release_task(struct task_struct *p)
 		       p->pid, refcount_read(&p->usage));
 		dump_stack();
 		return;
+	}
+	/* K5 event 9: authoritative release transition for a live-pid task.
+	 * Emitted after the already-reaped guard, so every emission is a real
+	 * first teardown and never carries pid 0. */
+	if (p->pid > 0) {
+		u64 run_id_hi, run_id_lo;
+
+		zn_get_run_id(&run_id_hi, &run_id_lo);
+		wasm_kernel_process_event(
+			ZN_EVENT_TASK_RELEASE_COMMITTED,
+			run_id_hi,
+			run_id_lo,
+			zn_get_next_event_seq(),
+			(u32)p->pid,
+			(u32)p->tgid,
+			current ? (u32)current->pid : 0, /* reaping task */
+			0,                    /* worker_id unused */
+			(u64)(u32)p->exit_code,
+			0,                    /* reserved */
+			"<task-release>",
+			13
+		);
 	}
 repeat:
 	/* don't need to get the RCU readlock here - the process is dead and

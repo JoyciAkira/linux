@@ -28,7 +28,7 @@ const TOOLS_DIR = __dirname;
 const { createBrokerSab, assertBrokerLayout, OFF, serviceBrokerKick } = await import("./dist/kwa-broker.js");
 
 // Load vmlinux.wasm — SOLE kernel authority (K3 invariant)
-const vmlinuxPath = join(TOOLS_DIR, "vmlinux.wasm");
+const vmlinuxPath = process.argv[2] ?? join(TOOLS_DIR, "vmlinux.wasm");
 console.log(`[K4-WITNESS] Loading ${vmlinuxPath}...`);
 const vmlinuxBytes = readFileSync(vmlinuxPath);
 const vmlinuxModule = await WebAssembly.compile(vmlinuxBytes);
@@ -70,6 +70,9 @@ const instance = await WebAssembly.instantiate(vmlinuxModule, {
     spawn_worker: () => {},
     run_on_main: () => {},
     process_event: () => {},
+    yield: () => { throw new Error("K4R4 standalone witness cannot run the scheduler"); },
+    finish_task: () => { throw new Error("K4R4 standalone witness cannot terminate scheduled tasks"); },
+    syscall_complete: () => { throw new Error("K4R4 standalone witness must use the naked syscall entry"); },
     process_event_handler: () => {},
   },
   user: {
@@ -392,7 +395,7 @@ const receipt = {
     arch: process.arch,
   },
   artifacts: {
-    vmlinuxSha256: "554cfcb50c38382406740824c5d1fa49e3d907607ba7c72681ef5d6738a6f457",
+    vmlinuxSha256: createHash("sha256").update(vmlinuxBytes).digest("hex"),
     userModuleSha256,
     workerJsSha256,
     witnessSha256,

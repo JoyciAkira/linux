@@ -8,12 +8,6 @@
 #include <linux/sched/task_stack.h>
 #include <linux/sched/task.h>
 
-struct task_bootstrap_args {
-	struct task_struct *task;
-	int (*fn)(void *);
-	void *fn_arg;
-};
-
 int arch_dup_task_struct(struct task_struct *dst, struct task_struct *src)
 {
 	*dst = *src;
@@ -26,117 +20,89 @@ struct task_struct *__switch_to(struct task_struct *from,
 {
 	struct thread_info *from_info = task_thread_info(from);
 	struct thread_info *to_info = task_thread_info(to);
+	struct kwa_exec_ctx ctx;
 	struct task_struct *prev;
-	int cpu, other_cpu;
+	int cpu, other;
 
 	cpu = atomic_xchg(&from_info->running_cpu, -1);
 	BUG_ON(cpu < 0); // current process must be scheduled to a cpu
 
-	// give the current cpu to the new worker
-	other_cpu = atomic_cmpxchg(&to_info->running_cpu, -1, cpu);
-	BUG_ON(other_cpu != -1); // new process should not have had a cpu
-
-	// wake the other worker:
-	// pr_info("wake cpu=%i task=%p\n", cpu, to);
-	BUG_ON(__builtin_wasm_memory_atomic_notify(
-		       &to_info->running_cpu.counter,
-		       /* at most, wake up: */ 1) > 1);
-
-	// pr_info("waiting cpu=%i task=%p in switch\n", cpu, from);
+	// give the current cpu to the new task
+	other = atomic_cmpxchg(&to_info->running_cpu, -1, cpu);
+	BUG_ON(other != -1); // new process should not have had a cpu
 
 	// this is set to true in do_task_dead:
 	if (wasm_get_thread_done()) {
-		wasm_kernel_halt_worker();
-	}
-
-	// sleep this worker:
-	/* memory.atomic.wait32 returns:
-	 * 0 -> the thread blocked and was woken
-		= we slept and were woken
-	 * 1 -> the value at the pointer didn't match the passed value
-	 	= somebody gave us their cpu straight away
-	 * 2 -> the thread blocked but timed out
-	 	= not possible because we pass an infinite timeout
-	*/
-	__builtin_wasm_memory_atomic_wait32(&from_info->running_cpu.counter,
-					    /* block if the value is: */ -1,
-					    /* timeout: */ -1);
-	cpu = atomic_read(&from_info->running_cpu);
-	BUG_ON(cpu < 0); // we should be given a new cpu
-	set_current_cpu(cpu);
-	prev = get_current_task_on(cpu);
-	set_current_task(current);
-
-	// pr_info("woke up cpu=%i task=%p in switch\n", cpu, from);
-
-	return prev;
-}
-
-static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args)
-{
-	struct task_struct *task = args->task;
-	int (*fn)(void *) = args->fn;
-	int fn_ret;
-	void *fn_arg = args->fn_arg;
-	struct thread_info *info = task_thread_info(task);
-	struct task_struct *prev;
-
-
-
-	// early_printk("                       waiting cpu=%i task=%p in entry\n",
-	// 	     atomic_read(&info->running_cpu), task);
-
-	// if we don't currently have a cpu, wait for one
-	for (;;) {
-		int ret = __builtin_wasm_memory_atomic_wait32(
-			&info->running_cpu.counter,
-			/* block if the value is: */ -1,
-			/* timeout: 1s */ 1000 * 1000 * 1000);
-		if (ret != 2) // 2 means timeout
-			break;
-		early_printk("task %p %s %d is waiting for cpu in entry\n",
-			     task, task->comm, task->pid);
-	}
-
-	set_current_cpu(atomic_read(&info->running_cpu));
-	BUG_ON(raw_smp_processor_id() < 0);
-
-	/* G12 thread-exit fix: a worker whose task already exited must never
-	 * re-enter the scheduler path (re-entry reruns do_exit, double
-	 * release_task and underflows the shared sighand refcount). Halt. */
-	if (READ_ONCE(task->exit_state) != 0) {
-		pr_err("G12-FIX: task_entry_inner re-entry on dead task pid=%d exit_state=%x; halting worker\n",
-		       task->pid, task->exit_state);
-		wasm_kernel_halt_worker();
+		/* Terminal handoff (K5): the dying task never returns. The host
+		 * cancels only its claimed broker slots (no invented result),
+		 * rejects/unwinds only its parked guest/root/syscall
+		 * continuations, retires its user worker, and starts/resumes
+		 * the kernel-named next task. Authority is never self-closed. */
+		kwa_task_retire(kwa_task_token(from));
+		wasm_kernel_finish_task(kwa_task_token(from),
+					kwa_task_token(to));
+		/* non-returning: the host rejects this continuation and unwinds
+		 * it; if a broken host ever resolved it, refuse to park a dead
+		 * task (loud hang, never a silent fake resume). */
 		for (;;)
 			;
 	}
 
-	prev = get_current_task_on(raw_smp_processor_id());
-	set_current_task(task);
+	// K5: cooperative yield. The host suspends this continuation here and
+	// resumes exactly `to`. On resume, kwa_context_suspend rebinds every
+	// mutable execution global (sp, current_cpu, current_task, thread_done)
+	// from C stack locals before we touch any scheduler state.
+	kwa_context_suspend(&ctx, KWA_YIELD_SWITCH, 0, kwa_task_token(to));
 
-	kfree(args);
+	cpu = atomic_read(&from_info->running_cpu);
+	BUG_ON(cpu < 0); // we should be given a new cpu
+	set_current_cpu(cpu);
+	prev = get_current_task_on(cpu); // BEFORE republishing current_tasks[]
+	set_current_task(current);
 
+	return prev;
+}
 
-	// early_printk(
-	// 	"                       woke up cpu=%i task=%p prev=%p kcpu=%i in entry\n",
-	// 	raw_smp_processor_id(), task, prev, info->cpu);
+/* K5: C-owned user-call wrapper. Records the task's kernel entry context on
+ * the C stack, parks this continuation in user.call while the real guest
+ * module runs on its pure user worker (broker syscalls re-enter through
+ * kwa_syscall_for_task on their own continuations), and restores the context
+ * after the actual return. A guest death never returns here: finish_task
+ * rejection unwinds this frame on the host side. */
+void kwa_enter_user_image(struct task_struct *task)
+{
+	struct kwa_exec_ctx entry;
 
-	schedule_tail(prev);
+	/* Consume the exec commit: whether we got here from the kernel-thread
+	 * entry path (initial /init exec) or the bridge exec path, entering
+	 * the image completes the commit. A lingering flag would make the
+	 * next ordinary syscall (e.g. getpid) wrongly re-enter the image. */
+	task_thread_info(task)->k5_flags &= ~K5_KF_EXEC_COMMITTED;
 
-	BUG_ON(!fn);
-
-	// callback returns when the kernel thread execs a process
-	fn_ret = fn(fn_arg);
-
+	kwa_ctx_save(&entry);
+	/* wasm_user_call() never returns on two paths, both host-owned:
+	 * - genuine exec re-entry: the host rejects the OLD image's pending
+	 *   frame with USER_IMAGE_REPLACED; the JS exception unwinds this
+	 *   entire continuation stack — kwa_ctx_restore_raw, the G12 check and
+	 *   do_exit below are unreachable on that path BY DESIGN. The task
+	 *   continues on the exec bridge continuation, so this must NEVER be
+	 *   routed into halt_worker/do_exit (AUTHORITY_HALT_BLOCKED must not
+	 *   fire for image replacement). The successor clears and re-arms the
+	 *   exec flag itself (guarded to real execve/execveat dispatches).
+	 * - terminal task death: finish_task cancellation unwinds here the
+	 *   same way; real death is exclusively finish_task/TERMINAL_TASK_EXIT.
+	 * Only a NORMAL return (user module ended without kernel-driven exit)
+	 * reaches the code below. */
 	wasm_user_call();
+	kwa_ctx_restore_raw(&entry);
 
 	/* G12 fix: if the task already exited through another path (execve
-	 * handoff, signal death), never call do_exit() again from this worker.
-	 * Re-entry loops do_task_dead -> BUG and re-runs release_task. */
+	 * handoff, signal death), never call do_exit() again from this
+	 * continuation. Re-entry loops do_task_dead -> BUG and re-runs
+	 * release_task. */
 	if (READ_ONCE(task->exit_state) != 0) {
-		pr_err("G12-FIX: worker pid=%d returned with exit_state=%x; halting instead of do_exit\n",
-		       task->pid, task->exit_state);
+		pr_err("G12-FIX: user image returned with exit_state=%x; halting instead of do_exit\n",
+		       task->exit_state);
 		wasm_kernel_halt_worker();
 		for (;;)
 			;
@@ -155,11 +121,95 @@ static void noinline_for_stack task_entry_inner(struct task_bootstrap_args *args
 	do_exit(0);
 }
 
-static void task_entry(void *args)
+/* K5: inner task body — called only AFTER the task stack is adopted, so its
+ * whole C frame (schedule_tail, bootstrap call, user-image park) lives on the
+ * task's own kernel stack, never on a foreign parked stack. */
+static noinline void kwa_task_entry_inner(struct task_struct *task,
+					  struct thread_info *ti,
+					  struct kwa_task_slot *slot, int cpu)
 {
-	set_stack_pointer(
-		task_pt_regs(((struct task_bootstrap_args *)args)->task) - 1);
-	task_entry_inner(args);
+	struct task_struct *prev;
+
+	wasm_set_thread_done(0); // fresh continuation: per-task default
+	set_current_cpu(cpu);
+	prev = get_current_task_on(cpu); // BEFORE republishing current_tasks[]
+	set_current_task(task);
+	if (!(slot->flags & KWA_SF_AUTOSTART))
+		schedule_tail(prev);
+
+	BUG_ON(!slot->fn);
+
+	// callback returns when the kernel thread execs a process
+	slot->fn(slot->fn_arg);
+
+	/* exec consumed the return: run the committed user image. The slot has
+	 * served its purpose; the continuation now lives as this task's
+	 * lifecycle park until guest death (finish_task) unwinds it. */
+	kwa_enter_user_image(task);
+}
+
+/* K5: task continuation entry. The host starts/resumes exactly this export
+ * (via WebAssembly.promising) when the kernel names the task. TRAMPOLINE
+ * DISCIPLINE: scalar locals only, CPU/validation checks BEFORE adopting the
+ * target stack, and the stack adopted (wasm ABI 16-byte aligned) BEFORE the
+ * noinline inner call — no C automatic struct is ever allocated on a foreign
+ * parked stack here. */
+__attribute__((export_name("kwa_task_entry"))) void
+kwa_task_entry(u32 task_token)
+{
+	struct kwa_task_slot *slot;
+	struct task_struct *task;
+	struct thread_info *ti;
+	unsigned long stack_top;
+	int cpu;
+
+	slot = kwa_task_take(task_token);
+	BUG_ON(!slot); // host must never start an unregistered/started task
+
+	if (task_token == 0) {
+		/* Boot: the known pristine root stack, outside any foreign
+		 * frame; the boot entry is __noreturn (ends in the cpu0 idle
+		 * loop), so this continuation becomes the preserved kernel
+		 * root stack. */
+		set_stack_pointer(kwa_boot_stack_top());
+		slot->fn(slot->fn_arg);
+		BUG(); // boot entry never returns
+	}
+
+	task = slot->task;
+	BUG_ON(!task);
+	ti = task_thread_info(task);
+
+	// scalar-only validation BEFORE any stack adoption
+	if (READ_ONCE(task->exit_state) != 0) {
+		/* G12 thread-exit fix: a task whose exit already ran must
+		 * never re-enter the scheduler path (re-entry reruns do_exit,
+		 * double release_task and underflows the shared sighand
+		 * refcount). Halt. */
+		pr_err("G12-FIX: kwa_task_entry re-entry on dead task pid=%d exit_state=%x; halting worker\n",
+		       task->pid, task->exit_state);
+		wasm_kernel_halt_worker();
+		for (;;)
+			;
+	}
+	if (slot->flags & KWA_SF_AUTOSTART) {
+		cpu = ti->cpu; // autostart owns its dedicated cpu
+	} else {
+		/* The host may start a task only after the scheduler handoff
+		 * (kernel.yield next_task) — the cpu is already ours; there is
+		 * no waiting loop. */
+		cpu = atomic_read(&ti->running_cpu);
+		BUG_ON(cpu < 0);
+	}
+
+	// adopt the task's kernel stack: ABI-aligned top with the pt_regs
+	// region preserved above it
+	stack_top = ALIGN_DOWN((unsigned long)task_pt_regs(task),
+			       KWA_STACK_ALIGN);
+	set_stack_pointer((void *)stack_top);
+	WRITE_ONCE(ti->k5_park_floor, stack_top);
+
+	kwa_task_entry_inner(task, ti, slot, cpu);
 }
 
 int wasm_call_clone_fn(void *arg);
@@ -167,7 +217,7 @@ int wasm_call_clone_fn(void *arg);
 int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 {
 	struct pt_regs *childregs = task_pt_regs(p);
-	struct task_bootstrap_args *bootstrap_args;
+	struct kwa_task_slot *slot;
 	char name[TASK_COMM_LEN + 16] = { 0 };
 	int name_len;
 
@@ -175,43 +225,28 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 
 	atomic_set(&task_thread_info(p)->running_cpu, -1);
 
-	// don't spawn a worker for idle threads
+	// don't spawn a continuation for idle threads
 	// this is probably a bad idea
 	if (args->idle)
 		return 0;
 
-	bootstrap_args =
-		kzalloc(sizeof(struct task_bootstrap_args), GFP_KERNEL);
-	if (!bootstrap_args)
+	name_len = snprintf(name, ARRAY_SIZE(name), "%s (%d)", p->comm,
+			    p->pid);
+
+	/* K5: register the task in the kernel-owned registry. The C entry
+	 * (kwa_task_entry) reads fn/arg from here; the host only ever handles
+	 * the opaque token. NOTE: p->pid is not allocated yet (copy_thread runs
+	 * before alloc_pid); the CLONE_COMMITTED process event is emitted by
+	 * the clone syscall callers after kernel_clone() returns the real
+	 * child pid — no pid0 event ever reaches the decoder. */
+	slot = kwa_task_register(p, args->fn, args->fn_arg, 0);
+	if (!slot)
 		return -ENOMEM;
-	bootstrap_args->fn = args->fn;
-	bootstrap_args->fn_arg = args->fn_arg;
-	bootstrap_args->task = p;
 
-	name_len = snprintf(name, ARRAY_SIZE(name), "%s (%d)", p->comm, p->pid);
-
-	/* SR0.10: Emit CLONE_WORKER_REQUESTED before spawning worker */
-	{
-		u64 run_id_hi, run_id_lo;
-		zn_get_run_id(&run_id_hi, &run_id_lo);
-		wasm_kernel_process_event(
-			ZN_EVENT_CLONE_WORKER_REQUESTED,
-			run_id_hi,
-			run_id_lo,
-			zn_get_next_event_seq(),
-			p->pid,           /* child pid */
-			p->tgid,          /* child tgid */
-			current->pid,     /* parent pid */
-			0,                /* worker_id: unused */
-			args->flags,      /* data0: clone_flags */
-			0,                /* data1: reserved */
-			p->comm,
-			strnlen(p->comm, sizeof(p->comm))
-		);
-	}
-
-	wasm_kernel_spawn_worker(&task_entry, bootstrap_args, name, name_len,
-				 args->fn == wasm_call_clone_fn);
+	wasm_kernel_spawn_worker(args->fn, args->fn_arg,
+				 name, name_len,
+				 args->fn == wasm_call_clone_fn,
+				 kwa_task_token(p));
 
 	return 0;
 }

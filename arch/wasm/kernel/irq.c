@@ -1,3 +1,4 @@
+#include <asm/globals.h>
 #include <asm/smp.h>
 #include <asm/timex.h>
 #include <linux/cpu.h>
@@ -27,12 +28,12 @@ void __cpuidle arch_cpu_idle(void)
 {
 	atomic64_t *pending = this_cpu_ptr(&irq_pending);
 	u64 deadline = __this_cpu_read(timer_deadline_ns);
+	struct kwa_exec_ctx ctx;
 	u64 now;
-	s64 timeout_ns;
-	int ret;
+	u64 timeout_ns;
 
 	if (deadline == 0) {
-		timeout_ns = -1; // forever
+		timeout_ns = 0; // indefinite
 	} else {
 		now = wasm_kernel_get_now_nsec();
 		if ((s64)(deadline - now) <= 0) {
@@ -41,15 +42,25 @@ void __cpuidle arch_cpu_idle(void)
 			raw_local_irq_enable();
 			return;
 		}
-		timeout_ns = deadline - now;
+		timeout_ns = deadline; // absolute deadline for yield
 	}
 
-	ret = __builtin_wasm_memory_atomic_wait64(&pending->counter, 0,
-						  timeout_ns);
+	// K5: Cooperative yield. The host sets a timer for the absolute
+	// deadline and — when it expires — MUST raise the kernel timer IRQ via
+	// trigger_irq_for_cpu before resuming this continuation, so the expiry
+	// becomes a real timer interrupt. Host resumes exactly this task.
+	for (;;) {
+		kwa_context_suspend(&ctx, KWA_YIELD_IDLE, timeout_ns,
+				    kwa_task_token(get_current_task()));
+		if (atomic64_read(pending) != 0)
+			break;
+		if (timeout_ns != 0 &&
+		    (s64)(timeout_ns - wasm_kernel_get_now_nsec()) <= 0)
+			break;
+	}
 
-	if (ret == 2 /* timeout reached */) {
+	if (atomic64_read(pending) & (1 << TIMER_IRQ)) {
 		__this_cpu_write(timer_deadline_ns, 0);
-		atomic64_or(1 << TIMER_IRQ, pending);
 	}
 
 	raw_local_irq_enable();
@@ -58,11 +69,13 @@ void __cpuidle arch_cpu_idle(void)
 void cpu_relax(void)
 {
 	unsigned long flags;
-	atomic64_t *pending;
+	struct kwa_exec_ctx ctx;
 	local_irq_save(flags);
-	pending = this_cpu_ptr(&irq_pending);
-	__builtin_wasm_memory_atomic_wait64(&pending->counter, 0,
-					    10 * 1000 * 1000);
+	// K5: bounded self-resume yield; the authority event loop breathes and
+	// resumes this same task after the deadline.
+	kwa_context_suspend(&ctx, KWA_YIELD_RELAX,
+			    wasm_kernel_get_now_nsec() + 10 * 1000 * 1000,
+			    kwa_task_token(get_current_task()));
 	local_irq_restore(flags);
 }
 

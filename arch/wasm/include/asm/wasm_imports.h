@@ -22,11 +22,52 @@ unsigned long long wasm_import(kernel, get_now_nsec)(void);
 
 void wasm_import(kernel, get_stacktrace)(char *buf, size_t size);
 
-void wasm_import(kernel, spawn_worker)(void (*fn)(void *), void *arg,
-				       char *name, size_t name_len, u32 share_user_memory);
+/** K5: kernel-owned task registry. Host holds opaque tokens only; C validates
+ * every token against live kernel task state before acting on it.
+ * @share_user_memory: bit0 (0x1) = share user memory (clone-with-fn threads);
+ *                     bit1 (0x2) = KWA_SF_AUTOSTART — host starts this token
+ *                     via kwa_task_entry immediately (secondary idle). Boot
+ *                     (token 0) is separately started when exports.boot
+ *                     returns. All other tokens: registration only. */
+void wasm_import(kernel, spawn_worker)(int (*fn)(void *), void *arg,
+				       char *name, size_t name_len, u32 share_user_memory,
+				       u32 task_token);
 
 void wasm_import(kernel, run_on_main)(void (*fn)(void *), void *arg);
 
+/** K5: cooperative scheduler yield. Suspending (JSPI) — the calling
+ * continuation parks here and the host resumes exactly one kernel-named peer.
+ * @reason: KWA_YIELD_* code
+ * @deadline_ns: ABSOLUTE deadline; 0 = no deadline (resume only when the
+ *               kernel-named nextTask chain yields back to selfTask)
+ * @self_task: opaque kernel token of the suspending task (0 if none)
+ * @next_task: opaque kernel token the host must start/resume (may equal
+ *             self_task for bounded self-resume yields; never chosen by host) */
+void wasm_import(kernel, yield)(u32 reason, u64 deadline_ns, u32 self_task,
+				u32 next_task);
+
+/** K5: terminal handoff. Non-returning: called by __switch_to when the
+ * switching-out task has thread_done set. The host cancels the dead task's
+ * outstanding claimed broker slots (no invented result), rejects/unwinds only
+ * that task's parked guest/root/syscall continuations, retires its user
+ * worker, then starts/resumes nextTask. Authority is never self-closed. */
+void wasm_import(kernel, finish_task)(u32 self_task, u32 next_task);
+
+/** K5: per-request syscall completion. Synchronous, called inside the
+ * kwa_syscall_for_task C frame with C-captured entry identity (immune to
+ * cross-task overwrites of the diagnostic kwa_get_last_* globals). The host
+ * binds this to the broker slot claimed by @dispatch_id. Exec/exit requests
+ * never reach this import: their slots are cancelled by finish_task. */
+void wasm_import(kernel, syscall_complete)(u32 task_token, u32 dispatch_id,
+					   long result, int pid, int tgid,
+					   u32 generation);
+
+/* Yield reasons — stable ABI values consumed by the host scheduler. */
+#define KWA_YIELD_SWITCH 1  /* scheduler handoff: next_task is mandatory */
+#define KWA_YIELD_IDLE 2    /* idle park: wake on deadline/IRQ */
+#define KWA_YIELD_DELAY 3   /* __delay bounded self-resume */
+#define KWA_YIELD_FORK_ACK 4
+#define KWA_YIELD_RELAX 5   /* cpu_relax bounded self-resume */
 void wasm_import(kernel, process_event)(u32 event_kind, u64 run_id_hi, u64 run_id_lo,
 					u64 event_seq, u32 pid, u32 tgid, u32 ppid,
 					u32 worker_id, u64 data0, u64 data1,
