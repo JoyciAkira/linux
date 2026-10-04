@@ -1,9 +1,9 @@
 {
-  "schema": "k4r-e2e-receipt-v3",
+  "schema": "k4r-e2e-receipt-v4",
   "K4_STATUS": "PASS",
   "sourceRepository": "JoyciAkira/linux",
   "sourceBranch": "fix/kwa-single-authority-v2",
-  "sourceCommit": "ef61cdbc1772f4c4cce6d5e3a3c5a798de1e58a6",
+  "sourceCommit": "a707b262e8919590f7add1226c2e43bffb98ce6a",
   "sourceTreeStatusBeforeRun": "clean",
   "runtime": {
     "node": "v26.5.0",
@@ -26,10 +26,11 @@
   "REAL_KERNEL_ENTRY_OBSERVED": true,
   "REQUEST_ID_MATCH": true,
   "GENERATION_CONTRACT_VALID": true,
-  "TASK_BINDING_VALID": true,
+  "KERNEL_IDENTITY_STAMP_OBSERVED": true,
+  "CURRENT_TASK_BINDING_PROVEN": false,
   "A5_SENTINEL": "0xDEADBEEF",
   "A5_SENTINEL_MATCH": true,
-  "RESULT_MATCH": true,
+  "RESULT_EXACT": true,
   "ERRNO_MATCH": true,
   "RESPONSE_CONSUMED_BY_SAME_WORKER": true,
   "SEQUENTIAL_REQUEST_COUNT": 3,
@@ -42,6 +43,12 @@
   "BROKER_ERRORS": 0,
   "WRONG_TASK_RESPONSE_COUNT": 0,
   "STALE_TASK_REQUEST_COUNT": 0,
+  "USER_RESULTS_RECEIVED": true,
+  "USER_RESULTS_DATA": {
+    "type": "k4_user_results",
+    "results": [0, 0, 0],
+    "callCount": 3
+  },
   "diagStages": [
     "INIT_RECEIVED",
     "MEMORY_IDENTITY",
