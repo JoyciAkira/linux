@@ -1,9 +1,9 @@
 {
-  "schema": "k4r-e2e-receipt-v4",
+  "schema": "k4r-e2e-receipt-v5",
   "K4_STATUS": "PASS",
   "sourceRepository": "JoyciAkira/linux",
   "sourceBranch": "fix/kwa-single-authority-v2",
-  "sourceCommit": "a707b262e8919590f7add1226c2e43bffb98ce6a",
+  "sourceCommit": "628308ec08061df199cb3409c36a7c3465c034e7",
   "sourceTreeStatusBeforeRun": "clean",
   "runtime": {
     "node": "v26.5.0",
@@ -13,8 +13,8 @@
   "artifacts": {
     "vmlinuxSha256": "554cfcb50c38382406740824c5d1fa49e3d907607ba7c72681ef5d6738a6f457",
     "userModuleSha256": "d111eb72cd140d3c01a1c795c841676059b35dbdca7ebcac35963e46b3c16420",
-    "workerJsSha256": "computed-at-build",
-    "witnessSha256": "computed-at-run"
+    "workerJsSha256": "f882307d274e4ba772c86ee5c79d0cc3695deecdfe9560fc111cda42124fa1c9",
+    "witnessSha256": "de3816dedd765bcff0d3327963727a697962a1f82155af253ca2df33c78d1ac3"
   },
   "REAL_SECONDARY_WORKER_CREATED": true,
   "SECONDARY_INIT_MESSAGE_RECEIVED": true,
@@ -24,10 +24,13 @@
   "BROKER_KICK_OBSERVED": true,
   "PRODUCTION_SERVICE_BROKER_KICK_USED": true,
   "REAL_KERNEL_ENTRY_OBSERVED": true,
-  "REQUEST_ID_MATCH": true,
+  "BROKER_RESP_ID_ENFORCEMENT": true,
+  "ABA_REJECT_COUNT": 0,
   "GENERATION_CONTRACT_VALID": true,
+  "GENERATION_SEQUENCE": [1, 2, 3],
   "KERNEL_IDENTITY_STAMP_OBSERVED": true,
   "CURRENT_TASK_BINDING_PROVEN": false,
+  "CURRENT_TASK_BINDING_NOTE": "init_task fallback; deferred to K5 integrated boot",
   "A5_SENTINEL": "0xDEADBEEF",
   "A5_SENTINEL_MATCH": true,
   "RESULT_EXACT": true,
