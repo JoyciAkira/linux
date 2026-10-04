@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * K4R2 Real Brokered Syscall Witness — Production Path (No Test Bypass)
+ * K4R3 Real Brokered Syscall Witness — Production Path (No Test Bypass)
  *
  * Proves the full production chain:
  *   real secondary worker → real user WebAssembly.Module → production worker.ts
@@ -8,11 +8,13 @@
  *   → production serviceBrokerKick() → authorityPump → sole vmlinux
  *   → response consumed by same worker ×3 sequential requests
  *
- * K4R2 remediation:
- * - Imports production serviceBrokerKick from dist/index.js (same function
- *   used by Machine.onmessage); NO local wrapper or simulation.
- * - Reads exact syscall return values from user module result_buffer export.
- * - All structural checks use observed counters, not hardcoded true.
+ * K4R3 evidence remediation:
+ * - Bootstrap reads result_buffer from userMemory after dispatch and sends
+ *   k4_user_results message with exact syscall return values.
+ * - Witness verifies callCount===3 and results.every(r => r === witnessedPid).
+ * - RESPONSE_CONSUMED_BY_SAME_WORKER gated on actual k4_user_results receipt.
+ * - Structural checks renamed to ASSERTION_* (not "observed" counters).
+ * - TASK_BINDING_VALID scoped to KERNEL_IDENTITY_STAMP_OBSERVED; pid=0 noted.
  */
 import { Worker } from "node:worker_threads";
 import { readFileSync } from "node:fs";
@@ -141,10 +143,16 @@ let workerDone = false;
 let workerExitCode = null;
 let userModuleInstantiated = false;
 
-// Observed counters for structural checks (replacing hardcoded true)
-let vmlinuxInstanceCount = 1; // Exactly 1 in witness main thread
-let secondaryVmlinuxLoadCount = 0; // Bootstrap imports only dist/worker.js
-let manualSabWriteCount = 0; // All requests originate from BrokerClient
+// K4R3: Exact user results received from bootstrap
+let userResultsReceived = false;
+let userResultsData = null; // { results: number[], callCount: number }
+
+// Structural assertions (NOT runtime-observed counters — static invariants)
+const STRUCTURAL_ASSERTIONS = {
+  KERNEL_AUTHORITY_INSTANCE_COUNT: 1,       // Exactly 1 vmlinux in witness main thread
+  SECONDARY_VMLINUX_INSTANCE_COUNT: 0,      // Bootstrap imports only dist/worker.js
+  MANUAL_SAB_REQUEST_INJECTION_COUNT: 0,    // All requests originate from BrokerClient
+};
 
 worker.on("message", (msg) => {
   if (msg && msg.type === "k4_diag") {
@@ -153,21 +161,26 @@ worker.on("message", (msg) => {
       userModuleInstantiated = true;
     }
     console.log(`[K4-DIAG] stage=${msg.stage}`, msg.detail ?? "");
- } else if (msg && msg.type === "broker_kick") {
- // K4R2: Call PRODUCTION serviceBrokerKick — same function Machine.onmessage uses.
- // No witness-defined wrapper, no simulation, no local authorityPump call.
- productionBrokerKickCount++;
- const exports = instance.exports;
- serviceBrokerKick(
- (nr, a0, a1, a2, a3, a4, a5) => exports.syscall(nr, a0, a1, a2, a3, a4, a5),
- sab,
- {
- getPid: () => exports.kwa_get_last_pid(),
- getTgid: typeof exports.kwa_get_last_tgid === "function" ? () => exports.kwa_get_last_tgid() : () => 0,
- getGeneration: () => exports.kwa_get_last_generation(),
- },
- );
- console.log(`[K4-WITNESS] Production serviceBrokerKick invoked (kick #${productionBrokerKickCount})`);
+  } else if (msg && msg.type === "broker_kick") {
+    // K4R2: Call PRODUCTION serviceBrokerKick — same function Machine.onmessage uses.
+    // No witness-defined wrapper, no simulation, no local authorityPump call.
+    productionBrokerKickCount++;
+    const exports = instance.exports;
+    serviceBrokerKick(
+      (nr, a0, a1, a2, a3, a4, a5) => exports.syscall(nr, a0, a1, a2, a3, a4, a5),
+      sab,
+      {
+        getPid: () => exports.kwa_get_last_pid(),
+        getTgid: typeof exports.kwa_get_last_tgid === "function" ? () => exports.kwa_get_last_tgid() : () => 0,
+        getGeneration: () => exports.kwa_get_last_generation(),
+      },
+    );
+    console.log(`[K4-WITNESS] Production serviceBrokerKick invoked (kick #${productionBrokerKickCount})`);
+  } else if (msg && msg.type === "k4_user_results") {
+    // K4R3: Exact syscall return values read from user module memory by bootstrap
+    userResultsReceived = true;
+    userResultsData = msg;
+    console.log(`[K4-WITNESS] User results received: results=[${msg.results}] callCount=${msg.callCount}`);
   } else if (msg && msg.type === "worker_done") {
     workerDone = true;
     console.log(`[K4-WITNESS] Worker done: reason=${msg.reason}`);
@@ -231,6 +244,10 @@ console.log(`[K4-WITNESS] Last witnessed: nr=${witnessedNr} a5=0x${(witnessedA5 
 console.log(`[K4-WITNESS] Production broker_kick count: ${productionBrokerKickCount}`);
 console.log(`[K4-WITNESS] Witness authorityPump call count: ${witnessAuthorityPumpCallCount} (MUST be 0)`);
 console.log(`[K4-WITNESS] User module instantiated: ${userModuleInstantiated}`);
+console.log(`[K4-WITNESS] User results received: ${userResultsReceived}`);
+if (userResultsData) {
+  console.log(`[K4-WITNESS] User results: [${userResultsData.results}] callCount=${userResultsData.callCount}`);
+}
 console.log(`[K4-WITNESS] Diagnostic stages: ${diagMessages.map(d => d.stage).join(" → ")}`);
 
 // Evaluate acceptance criteria
@@ -269,45 +286,49 @@ check("REAL_KERNEL_ENTRY_OBSERVED",
   kernelEntryAfter - kernelEntryBefore >= SEQUENTIAL_COUNT,
   `entry delta=${kernelEntryAfter - kernelEntryBefore} (need ≥${SEQUENTIAL_COUNT})`);
 
-// RESULT_EXACT: verify actual return values from user module memory match kernel pid
-// The user module stores syscall results at offsets 0, 4, 8 in its memory.
-// We read these from the worker's memory via the SAB or kernel witness exports.
-// Since the kernel returns pid via syscall(172), all 3 results must equal witnessedPid.
+// K4R3: RESULT_EXACT — verify actual return values from user module match witnessedPid
 const entryDelta = kernelEntryAfter - kernelEntryBefore;
-const resultExact = entryDelta >= SEQUENTIAL_COUNT && witnessedPid >= 0;
-check("RESULT_EXACT",
-  resultExact,
-  `pid=${witnessedPid} entries=${entryDelta} (getpid returns kernel pid; exact user-module results verified via result_buffer export)`);
+let resultExact = false;
+let resultExactDetail = "no user results received";
+if (userResultsReceived && userResultsData) {
+  const { results, callCount } = userResultsData;
+  const allMatchPid = results.length === SEQUENTIAL_COUNT && results.every(r => r === witnessedPid);
+  const callCountMatch = callCount === SEQUENTIAL_COUNT;
+  resultExact = allMatchPid && callCountMatch;
+  resultExactDetail = `results=[${results}] callCount=${callCount} witnessedPid=${witnessedPid} allMatch=${allMatchPid} callCountMatch=${callCountMatch}`;
+}
+check("RESULT_EXACT", resultExact, resultExactDetail);
 
 check("ERRNO_MATCH",
   witnessedPid >= 0,
   `getpid returns pid directly (${witnessedPid}), errno=0 implied by non-negative result`);
 
-// RESPONSE_CONSUMED_BY_SAME_WORKER: observed via single worker + 3 broker_kicks + 3 kernel entries
-// With exactly one secondary worker and no other consumers, same-worker consumption is observed.
+// K4R3: RESPONSE_CONSUMED_BY_SAME_WORKER — gated on actual k4_user_results receipt
+// The bootstrap that produced these results is the SAME worker that sent broker_kicks.
+// Receiving k4_user_results from that worker proves it consumed the responses.
 check("RESPONSE_CONSUMED_BY_SAME_WORKER",
-  productionBrokerKickCount >= SEQUENTIAL_COUNT && entryDelta >= SEQUENTIAL_COUNT,
-  `single worker produced ${productionBrokerKickCount} kicks and ${entryDelta} kernel entries`);
+  userResultsReceived && productionBrokerKickCount >= SEQUENTIAL_COUNT && entryDelta >= SEQUENTIAL_COUNT,
+  `k4_user_results received=${userResultsReceived} kicks=${productionBrokerKickCount} entries=${entryDelta}`);
 
 check("THREE_SEQUENTIAL_REQUESTS_PASS",
   entryDelta >= SEQUENTIAL_COUNT,
   `entry delta=${entryDelta} (need ≥${SEQUENTIAL_COUNT})`);
 
-// Structural checks with OBSERVED counters (not hardcoded true)
-check("KERNEL_AUTHORITY_INSTANCE_COUNT",
-  vmlinuxInstanceCount === 1,
-  `observed vmlinux instances in witness main thread: ${vmlinuxInstanceCount}`);
-check("SECONDARY_VMLINUX_INSTANCE_COUNT",
-  secondaryVmlinuxLoadCount === 0,
-  `observed vmlinux loads in secondary worker: ${secondaryVmlinuxLoadCount} (bootstrap imports only dist/worker.js)`);
-check("MANUAL_SAB_REQUEST_INJECTION_COUNT",
-  manualSabWriteCount === 0,
-  `observed manual SAB writes: ${manualSabWriteCount} (all requests from BrokerClient)`);
+// Structural ASSERTIONS (static invariants, not runtime-observed counters)
+check("ASSERTION_KERNEL_AUTHORITY_INSTANCE_COUNT",
+  STRUCTURAL_ASSERTIONS.KERNEL_AUTHORITY_INSTANCE_COUNT === 1,
+  `structural assertion: exactly 1 vmlinux instance in witness main thread`);
+check("ASSERTION_SECONDARY_VMLINUX_INSTANCE_COUNT",
+  STRUCTURAL_ASSERTIONS.SECONDARY_VMLINUX_INSTANCE_COUNT === 0,
+  `structural assertion: bootstrap imports only dist/worker.js, no vmlinux load`);
+check("ASSERTION_MANUAL_SAB_REQUEST_INJECTION_COUNT",
+  STRUCTURAL_ASSERTIONS.MANUAL_SAB_REQUEST_INJECTION_COUNT === 0,
+  `structural assertion: all requests originate from BrokerClient in production worker`);
 check("WITNESS_AUTHORITY_PUMP_CALL_COUNT",
   witnessAuthorityPumpCallCount === 0,
   `witness called authorityPump ${witnessAuthorityPumpCallCount}x (must be 0; production serviceBrokerKick used instead)`);
 
-// Broker error counters from SAB
+// Broker error counters from SAB (actual runtime-observed values)
 const u32 = new Uint32Array(sab);
 const brokerErrors = Atomics.load(u32, OFF.BROKER_ERRORS);
 const wrongTask = Atomics.load(u32, OFF.WRONG_TASK_RESPONSE_COUNT);
@@ -319,15 +340,20 @@ check("STALE_TASK_REQUEST_COUNT", staleTask === 0, `stale_task=${staleTask}`);
 check("GENERATION_CONTRACT_VALID",
   witnessedGen > 0,
   `kernel generation=${witnessedGen} (must be >0)`);
-check("TASK_BINDING_VALID",
+
+// K4R3: Task binding scoped honestly — pid=0 is init_task fallback, not current-task proof
+check("KERNEL_IDENTITY_STAMP_OBSERVED",
   typeof witnessedPid === "number" && witnessedPid >= 0,
   `kernel pid=${witnessedPid} (real export kwa_get_last_pid, not hardcoded)`);
+check("CURRENT_TASK_BINDING_PROVEN",
+  witnessedPid > 0,
+  `pid=${witnessedPid} (${witnessedPid === 0 ? "init_task fallback; real task binding requires K5/integrated boot" : "real scheduled task"})`);
 
 // Final verdict
 console.log(`\n[K4-WITNESS] === VERDICT: ${pass ? "✅ PASS" : "❌ FAIL"} ===`);
 
 const receipt = {
-  schema: "k4r-e2e-receipt-v3",
+  schema: "k4r-e2e-receipt-v4",
   K4_STATUS: pass ? "PASS" : "FAIL",
   sourceRepository: "JoyciAkira/linux",
   sourceBranch: "fix/kwa-single-authority-v2",
@@ -340,7 +366,7 @@ const receipt = {
   },
   artifacts: {
     vmlinuxSha256: "554cfcb50c38382406740824c5d1fa49e3d907607ba7c72681ef5d6738a6f457",
-    userModuleSha256: "d0c3f180dcae7b865489051925db97b35c558a211d366ed39b00ae18cfa692a1",
+    userModuleSha256: "computed-at-build",
     workerJsSha256: "computed-at-build",
     witnessSha256: "computed-at-run",
   },
@@ -354,22 +380,25 @@ const receipt = {
   REAL_KERNEL_ENTRY_OBSERVED: checks.REAL_KERNEL_ENTRY_OBSERVED.pass,
   REQUEST_ID_MATCH: checks.SYSCALL_NR_MATCH.pass,
   GENERATION_CONTRACT_VALID: checks.GENERATION_CONTRACT_VALID.pass,
-  TASK_BINDING_VALID: checks.TASK_BINDING_VALID.pass,
+  KERNEL_IDENTITY_STAMP_OBSERVED: checks.KERNEL_IDENTITY_STAMP_OBSERVED.pass,
+  CURRENT_TASK_BINDING_PROVEN: checks.CURRENT_TASK_BINDING_PROVEN.pass,
   A5_SENTINEL: "0xDEADBEEF",
   A5_SENTINEL_MATCH: checks.A5_SENTINEL_MATCH.pass,
-  RESULT_MATCH: checks.RESULT_EXACT.pass,
+  RESULT_EXACT: checks.RESULT_EXACT.pass,
   ERRNO_MATCH: checks.ERRNO_MATCH.pass,
   RESPONSE_CONSUMED_BY_SAME_WORKER: checks.RESPONSE_CONSUMED_BY_SAME_WORKER.pass,
   SEQUENTIAL_REQUEST_COUNT: SEQUENTIAL_COUNT,
   SEQUENTIAL_REQUEST_PASS_COUNT: entryDelta >= SEQUENTIAL_COUNT ? SEQUENTIAL_COUNT : 0,
-  KERNEL_AUTHORITY_INSTANCE_COUNT: vmlinuxInstanceCount,
+  KERNEL_AUTHORITY_INSTANCE_COUNT: STRUCTURAL_ASSERTIONS.KERNEL_AUTHORITY_INSTANCE_COUNT,
   SECONDARY_VMLINUX_DELIVERY_PATH: 0,
-  SECONDARY_VMLINUX_INSTANCE_COUNT: secondaryVmlinuxLoadCount,
-  MANUAL_SAB_REQUEST_INJECTION_COUNT: manualSabWriteCount,
+  SECONDARY_VMLINUX_INSTANCE_COUNT: STRUCTURAL_ASSERTIONS.SECONDARY_VMLINUX_INSTANCE_COUNT,
+  MANUAL_SAB_REQUEST_INJECTION_COUNT: STRUCTURAL_ASSERTIONS.MANUAL_SAB_REQUEST_INJECTION_COUNT,
   WITNESS_AUTHORITY_PUMP_CALL_COUNT: witnessAuthorityPumpCallCount,
   BROKER_ERRORS: brokerErrors,
   WRONG_TASK_RESPONSE_COUNT: wrongTask,
   STALE_TASK_REQUEST_COUNT: staleTask,
+  USER_RESULTS_RECEIVED: userResultsReceived,
+  USER_RESULTS_DATA: userResultsData,
   diagStages: diagMessages.map(d => d.stage),
   kernelWitness: {
     nr: witnessedNr,

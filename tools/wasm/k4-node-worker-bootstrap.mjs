@@ -102,6 +102,22 @@ parentPort.on("message", async (rawData) => {
       };
 
       dispatchToProduction(initMessage);
+
+      // K4R3: Read exact syscall return values from user module result_buffer.
+      // Layout: [result0:i32, result1:i32, result2:i32, call_count:i32] at offset 0.
+      // This proves the user module actually received kernel responses.
+      const memView = new DataView(userMemory.buffer);
+      const results = [
+        memView.getInt32(0, true),
+        memView.getInt32(4, true),
+        memView.getInt32(8, true),
+      ];
+      const callCount = memView.getInt32(12, true);
+      parentPort.postMessage({
+        type: "k4_user_results",
+        results,
+        callCount,
+      });
     } catch (err) {
       parentPort.postMessage({
         type: "k4_diag",
