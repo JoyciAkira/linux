@@ -1,107 +1,125 @@
 #!/usr/bin/env node
 /**
- * K4 Node Worker Bootstrap
- * Thin adapter: bridges Node.js worker_threads to browser Web Worker semantics
- * so that dist/worker.js (production code) runs unmodified under Node.
+ * K4 Node Worker Bootstrap — Production Path (No Test Bypass)
  *
- * Provides:
- *   globalThis.self       → worker_threads parentPort bridge
- *   postMessage(msg)      → parentPort.postMessage(msg)
- *   addEventListener()    → parentPort.on("message") / .on("error")
- *   MessageEvent          → { data } wrapper
+ * Bridges Node.js worker_threads to browser Web Worker semantics so that
+ * dist/worker.js (production code) runs unmodified under Node.
  *
- * This file is TEST-ONLY infrastructure. It must NOT be imported by production
- * browser code. Production worker.ts uses native Web Worker APIs only.
+ * Node worker_threads CANNOT transfer WebAssembly.Module or WebAssembly.Memory
+ * via postMessage. The witness sends userModuleBytes (Uint8Array) instead;
+ * this bootstrap compiles it into a real WebAssembly.Module before forwarding
+ * to production worker.ts.
+ *
+ * CRITICAL: Production worker.ts uses `self.onmessage = handler` (direct
+ * assignment), NOT addEventListener. This bootstrap captures that assignment
+ * and routes messages through deserialization + forwarding.
  */
 import { parentPort, workerData } from "node:worker_threads";
 
 if (!parentPort) {
-  throw new Error("[K4-BOOTSTRAP] k4-node-worker-bootstrap.mjs must run as a worker_thread, not main thread");
+  throw new Error("[K4-BOOTSTRAP] must run as worker_thread, not main thread");
 }
 
-// Bridge parentPort to self.postMessage / self.addEventListener
-const listeners = new Map();
+// Storage for the production onmessage handler assigned by dist/worker.js
+let productionOnMessage = null;
+const addEventListenerListeners = [];
 
 globalThis.self = {
   name: workerData?.name ?? "k4-secondary",
   postMessage(msg) {
     parentPort.postMessage(msg);
   },
+  set onmessage(handler) {
+    productionOnMessage = handler;
+  },
+  get onmessage() {
+    return productionOnMessage;
+  },
   addEventListener(type, handler) {
     if (type === "message") {
-      const wrapped = (data) => handler({ data });
-      listeners.set(handler, wrapped);
-      parentPort.on("message", wrapped);
+      addEventListenerListeners.push(handler);
     } else if (type === "error") {
       parentPort.on("error", handler);
-    } else if (type === "messageerror") {
-      // Node doesn't have messageerror; no-op
     } else if (type === "unhandledrejection") {
       process.on("unhandledRejection", handler);
     }
   },
-  removeEventListener(type, handler) {
-    if (type === "message") {
-      const wrapped = listeners.get(handler);
-      if (wrapped) {
-        parentPort.off("message", wrapped);
-        listeners.delete(handler);
-      }
-    }
-  },
 };
 
-// K4 TEST MODE: Intercept InitMessage with k4TestMode=true BEFORE production worker.js
-// processes it. This allows exercising BrokerClient.invoke() in the real worker thread
-// without requiring a WebAssembly.Module (which would trigger the production guard).
-// This is TEST-ONLY infrastructure; production browser path always has parent_user_module.
-parentPort.on("message", (data) => {
-  if (data && data.k4TestMode === true) {
-    parentPort.postMessage({ type: "k4_diag", stage: "INIT_RECEIVED", detail: { workerId: data.workerId, k4TestMode: true } });
-    // Dynamically import BrokerClient from compiled dist
-    import("./dist/kwa-broker.js").then(async ({ BrokerClient }) => {
-      const client = new BrokerClient(data.brokerSab, data.workerId);
-      const results = [];
-      for (let seq = 1; seq <= (data.k4TestSeq || 3); seq++) {
-        try {
-          const resp = client.invoke(
-            data.k4TestNr,
-            0, 0, 0, 0, 0,
-            data.k4TestA5 | 0,
-            0, 0,
-            () => { parentPort.postMessage({ type: "broker_kick" }); },
-          );
-          results.push({
-            type: "k4_result",
-            seq,
-            result: resp.result,
-            errno: resp.errno,
-            reqId: seq,
-            kernelGeneration: resp.kernelGeneration,
-            workerId: data.workerId,
-          });
-          parentPort.postMessage(results[results.length - 1]);
-        } catch (err) {
-          parentPort.postMessage({
-            type: "k4_diag",
-            stage: "TOP_LEVEL_FATAL",
-            detail: { seq, error: String(err), stack: err?.stack },
-          });
-          break;
-        }
-      }
-      parentPort.postMessage({ type: "worker_done", reason: "k4_test_complete" });
-    }).catch((err) => {
+// Capture uncaught errors for diagnostic forwarding
+process.on("uncaughtException", (err) => {
+  parentPort.postMessage({
+    type: "k4_diag",
+    stage: "TOP_LEVEL_FATAL",
+    detail: {
+      errorName: err?.name,
+      errorMessage: String(err?.message ?? err),
+      errorStack: err?.stack,
+      source: "uncaughtException",
+    },
+  });
+});
+
+// Forward a message event to all registered production handlers
+function dispatchToProduction(data) {
+  const event = { data };
+  if (typeof productionOnMessage === "function") {
+    productionOnMessage(event);
+  }
+  for (const listener of addEventListenerListeners) {
+    listener(event);
+  }
+}
+
+// ONE-SHOT intercept: deserialize first message with userModuleBytes,
+// then forward corrected InitMessage to production handlers.
+let initHandled = false;
+parentPort.on("message", async (rawData) => {
+  if (!initHandled && rawData && rawData.userModuleBytes) {
+    initHandled = true;
+    try {
+      const userModule = await WebAssembly.compile(rawData.userModuleBytes);
+
+      // Minimal user modules declare non-shared memory; provide matching memory.
+      // Production kernel-shaped modules use shared memory, but our K4 test
+      // user module imports plain (memory 1) which is non-shared.
+      const userMemory = new WebAssembly.Memory({
+        initial: rawData.userMemoryInitial ?? 1,
+        maximum: rawData.userMemoryMaximum ?? 256,
+      });
+
+      const initMessage = {
+        fn: rawData.fn,
+        arg: rawData.arg,
+        memory: userMemory,
+        parent_user_module: userModule,
+        parent_user_memory: userMemory,
+        parent_tls_base: rawData.parent_tls_base ?? 0,
+        brokerSab: rawData.brokerSab,
+        workerId: rawData.workerId,
+        d1TraceEnabled: rawData.d1TraceEnabled,
+        d1RunId: rawData.d1RunId,
+      };
+
+      dispatchToProduction(initMessage);
+    } catch (err) {
       parentPort.postMessage({
         type: "k4_diag",
         stage: "TOP_LEVEL_FATAL",
-        detail: { error: "BrokerClient import failed", message: String(err) },
+        detail: {
+          errorName: err?.name,
+          errorMessage: String(err?.message ?? err),
+          errorStack: err?.stack,
+          source: "module_deserialization",
+        },
       });
-    });
-    // Do NOT forward to production worker.js — test mode handles its own lifecycle
+    }
     return;
   }
+
+  // All subsequent messages: forward directly
+  dispatchToProduction(rawData);
 });
 
-// Import the compiled production worker — this registers self.onmessage etc.
+// Import compiled production worker — assigns self.onmessage etc.
 await import("./dist/worker.js");

@@ -125,6 +125,8 @@ function user_imports({
 }): {
   module: WebAssembly.Module | null;
   memory: WebAssembly.Memory | null;
+  instance: WebAssembly.Instance | null;
+  doInstantiate: () => void;
   imports: Imports["user"];
 } {
   const HALT_USER = Symbol("halt user");
@@ -265,9 +267,19 @@ function user_imports({
     get module() {
       return module;
     },
+    set module(m: WebAssembly.Module | null) {
+      module = m;
+    },
     get memory() {
       return memory;
     },
+    set memory(m: WebAssembly.Memory | null) {
+      memory = m;
+    },
+    get instance() {
+      return instance;
+    },
+    doInstantiate,
     imports: {
       // program management:
       compile(buf, size) {
@@ -636,10 +648,28 @@ self.onmessage = (event: MessageEvent<InitMessage>) => {
  currentStage = "AFTER_KERNEL_IMPORTS";
  postK4Diag("AFTER_KERNEL_IMPORTS");
 
- // Instantiate USER module only — NO vmlinux
- currentStage = "BEFORE_USER_INSTANTIATE";
- postK4Diag("BEFORE_USER_INSTANTIATE", { importKeys: Object.keys(imports), userImportKeys: Object.keys(imports.user ?? {}) });
- const userInstance = new WebAssembly.Instance(parent_user_module, imports);
+  // K4: Detect minimal user modules that import only env+linux (not kernel-shaped).
+  // These must be instantiated via doInstantiate() which constructs the correct
+  // broker-routed {env:{memory}, linux:{syscall,...}} import object.
+  // Kernel-shaped modules (blink, guest OS) use the full imports object below.
+  const isMinimalUserModule = moduleImports.length <= 2 &&
+    moduleImports.every(i => i.module === "env" || i.module === "linux");
+
+  let userInstance: WebAssembly.Instance;
+  if (isMinimalUserModule) {
+    // Minimal user module path: bind parent module/memory into user_imports closure,
+    // then call doInstantiate() which builds broker-only imports correctly.
+    user.module = parent_user_module;
+    user.memory = parent_user_memory ?? memory;
+    user.doInstantiate();
+    assert(user.instance, "doInstantiate failed to set instance for minimal user module");
+    userInstance = user.instance;
+  } else {
+    // Kernel-shaped module path: use full imports object (existing behavior)
+    currentStage = "BEFORE_USER_INSTANTIATE";
+    postK4Diag("BEFORE_USER_INSTANTIATE", { importKeys: Object.keys(imports), userImportKeys: Object.keys(imports.user ?? {}) });
+    userInstance = new WebAssembly.Instance(parent_user_module, imports);
+  }
  currentStage = "AFTER_USER_INSTANTIATE";
  postK4Diag("AFTER_USER_INSTANTIATE", { exportNames: Object.keys(userInstance.exports) });
  try {
