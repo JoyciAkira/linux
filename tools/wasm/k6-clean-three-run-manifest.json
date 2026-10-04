@@ -1,0 +1,71 @@
+{
+  "schema": "k6-clean-three-run-certification-manifest-v1",
+  "K6_STATUS": "PASS",
+  "verdict": "PASS",
+  "REPEATABLE": true,
+  "FAILURE_CONTAINMENT_PROVEN": true,
+  "sourceRepository": "JoyciAkira/linux",
+  "sourceBranch": "fix/kwa-single-authority-v2",
+  "sourceCommit": "0806b2bc9a1c84ff3274949052fa2d6e5da4ff15",
+  "sourceTreeStatusBeforeRun": "clean",
+  "kernelWasmSha256": "d0fbadc4cdc1c9caf1be67de5f2e8d59991408df83a936251597592a403a8ce1",
+  "timestamp": "2026-10-04T22:52:31.950Z",
+  "K6_RUN_COUNT": 3,
+  "K6_RUN_PASS_COUNT": 3,
+  "runIds": [
+    "2030c9edc439564707d2983b4391b659",
+    "c183481db064861267a53708598b413f",
+    "dbc8cdc64b409101b971870f8b2437a3"
+  ],
+  "runReceipts": [
+    {
+      "run": 1,
+      "runId": "2030c9edc439564707d2983b4391b659",
+      "file": "k6-clean-run-1-receipt.json",
+      "sha256": "21d41f774a32e71a5ee9475732b91806dc44037aed7fb58c992b0f99b3618c4d",
+      "verdict": "PASS",
+      "checks": 12,
+      "errors": 0
+    },
+    {
+      "run": 2,
+      "runId": "c183481db064861267a53708598b413f",
+      "file": "k6-clean-run-2-receipt.json",
+      "sha256": "9f996181e907eb2f426f2b6351a285eeacb25f6e913bedbcf187ccbc39b4e34b",
+      "verdict": "PASS",
+      "checks": 12,
+      "errors": 0
+    },
+    {
+      "run": 3,
+      "runId": "dbc8cdc64b409101b971870f8b2437a3",
+      "file": "k6-clean-run-3-receipt.json",
+      "sha256": "94a40cfe5958f385508ba02c3fbc02501ee21389e9b4df790d750fdbd8d326f2",
+      "verdict": "PASS",
+      "checks": 12,
+      "errors": 0
+    }
+  ],
+  "checksSummary": {
+    "totalRequiredChecks": 12,
+    "run1Passed": 12,
+    "run2Passed": 12,
+    "run3Passed": 12,
+    "allChecksSatisfied": true
+  },
+  "faultInjectionPhases": {
+    "invalidSyscallRejection": true,
+    "cloneWaitStressTest": true,
+    "authorityAlivePostStress": true
+  },
+  "brokerInvariants": {
+    "BROKER_ERRORS": 0,
+    "WRONG_TASK_RESPONSE_COUNT": 0,
+    "STALE_TASK_REQUEST_COUNT": 0,
+    "POST_FREE_DISPATCH_COUNT": 0,
+    "UNATTRIBUTED_RESPONSE_COUNT": 0,
+    "ABA_REJECT_COUNT": 0
+  },
+  "KWA_CORRECTNESS": "NOT_PROVEN",
+  "PRODUCTION_READY": false
+}

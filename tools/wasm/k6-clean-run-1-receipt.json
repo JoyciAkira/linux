@@ -1,0 +1,94 @@
+{
+  "schema": "k6-fault-injection-v1",
+  "K6_STATUS": "PASS",
+  "verdict": "PASS",
+  "sourceRepository": "JoyciAkira/linux",
+  "sourceBranch": "fix/kwa-single-authority-v2",
+  "sourceCommit": "0806b2bc9a1c84ff3274949052fa2d6e5da4ff15",
+  "sourceTreeStatusBeforeRun": "clean",
+  "timestamp": "2026-10-04T22:51:59.817Z",
+  "REAL_CHILD_LIFECYCLE": true,
+  "REPEATABLE": true,
+  "INVALID_SYSCALL_RESULT": -38,
+  "TRAP_CHILD_PID": 10,
+  "TRAP_CHILD_WAIT_STATUS": 1,
+  "STORM_ROUNDS_COMPLETED": 10,
+  "FINAL_GETPID": 1,
+  "checks": {
+    "MACHINE_BOOT_PATH_USED": true,
+    "PRODUCTION_MODULE_EVALUATED": true,
+    "INVALID_SYSCALL_REJECTED": true,
+    "TRAP_CHILD_CLEANED_UP": true,
+    "STORM_CHILDREN_COMPLETED": true,
+    "AUTHORITY_ALIVE_AFTER_FAULTS": true,
+    "BROKER_COUNTERS_CLEAN": true,
+    "SINGLE_KERNEL_INSTANCE": true,
+    "PROCESS_EVENT_SEQUENCE_MONOTONIC": true,
+    "PROCESS_EVENT_SINGLE_RUN_ID": true,
+    "RUNTIME_ERRORS": true,
+    "REPEATABLE": true
+  },
+  "KERNEL_AUTHORITY_INSTANCE_COUNT": 1,
+  "SECONDARY_VMLINUX_INSTANCE_COUNT": 0,
+  "SECONDARY_VMLINUX_DELIVERY_PATH": 0,
+  "brokerCounters": {
+    "UNATTRIBUTED_RESPONSE_COUNT": 0,
+    "TERMINAL_CANCEL_COUNT": 0,
+    "BOOT_COUNT": 0,
+    "SECONDARY_INST_COUNT": 0,
+    "POST_FREE_DISPATCH_COUNT": 0,
+    "WRONG_TASK_RESPONSE_COUNT": 0,
+    "STALE_TASK_REQUEST_COUNT": 0,
+    "BROKER_ERRORS": 0,
+    "ABA_REJECT_COUNT": 0
+  },
+  "RUN_ID": "2030c9edc439564707d2983b4391b659",
+  "K6_RUN_COUNT": 1,
+  "K6_RUN_PASS_COUNT": 1,
+  "environmentIdentity": {
+    "node": "v26.5.0",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "artifacts": {
+    "/tmp/kwa-build/tools/wasm/vmlinux.wasm": {
+      "sha256": "d0fbadc4cdc1c9caf1be67de5f2e8d59991408df83a936251597592a403a8ce1",
+      "bytes": 3561465
+    },
+    "/private/tmp/k6-clean-wt/tools/wasm/k6-fault-injection.cpio": {
+      "sha256": "a58b20417b0ae89cba75166b280df63e3ac1bf4f42634ccc903a6257c6a440a9",
+      "bytes": 1024
+    },
+    "/private/tmp/k6-clean-wt/tools/wasm/dist/index.js": {
+      "sha256": "8f1ef4273c936605bb7b87810b4547c0b05c7e4c28f550b3bac609376230097b",
+      "bytes": 17757
+    },
+    "/private/tmp/k6-clean-wt/tools/wasm/dist/worker.js": {
+      "sha256": "8258a5f5fd79b552188bb548d31317f5d939620867b3b9fd99e4a0fb4191463f",
+      "bytes": 87964
+    },
+    "/private/tmp/k6-clean-wt/tools/wasm/dist/wasm.js": {
+      "sha256": "d32cb2e8cfc9a2fbeeacff47e1d95ed11d6819ae4ea6315f07d0053578553753",
+      "bytes": 6523
+    },
+    "/private/tmp/k6-clean-wt/tools/wasm/dist/kwa-broker.js": {
+      "sha256": "080b29081605649f910c485426245be243129dbd66d398b2e9574edd80cd83dd",
+      "bytes": 13854
+    },
+    "/private/tmp/k6-clean-wt/tools/wasm/k5-node-web-worker-adapter.mjs": {
+      "sha256": "ebad10771b09d8b469138d407cc5778ab9ca35ccb99ed4a2e41cbf9997a55725",
+      "bytes": 2190
+    },
+    "/private/tmp/k6-clean-wt/tools/wasm/k5-node-worker-bootstrap.mjs": {
+      "sha256": "3e805fd0c2559035e4b51ee4049e768b99a4b698f9290a53f185ef44d0b8958d",
+      "bytes": 3092
+    },
+    "/private/tmp/k6-clean-wt/tools/wasm/k5-machine-witness.mjs": {
+      "sha256": "98c9e07aecc338125e73c48bf6024be1afc9460880e965e5845a0f0703202f5e",
+      "bytes": 8657
+    }
+  },
+  "errors": [],
+  "KWA_CORRECTNESS": "NOT_PROVEN",
+  "PRODUCTION_READY": false
+}
