@@ -1,9 +1,9 @@
 {
-  "schema": "k4r-e2e-receipt-v2",
+  "schema": "k4r-e2e-receipt-v3",
   "K4_STATUS": "PASS",
   "sourceRepository": "JoyciAkira/linux",
   "sourceBranch": "fix/kwa-single-authority-v2",
-  "sourceCommit": "2e04dd27fbc98ef3140510b3e222540a6f7ffa1b",
+  "sourceCommit": "ef61cdbc1772f4c4cce6d5e3a3c5a798de1e58a6",
   "sourceTreeStatusBeforeRun": "clean",
   "runtime": {
     "node": "v26.5.0",
@@ -12,7 +12,7 @@
   },
   "artifacts": {
     "vmlinuxSha256": "554cfcb50c38382406740824c5d1fa49e3d907607ba7c72681ef5d6738a6f457",
-    "userModuleSha256": "d0c3f180dcae7b865489051925db97b35c558a211d366ed39b00ae18cfa692a1",
+    "userModuleSha256": "d111eb72cd140d3c01a1c795c841676059b35dbdca7ebcac35963e46b3c16420",
     "workerJsSha256": "computed-at-build",
     "witnessSha256": "computed-at-run"
   },
@@ -22,7 +22,7 @@
   "WORKER_LINUX_SYSCALL_OBSERVED": true,
   "SYSCALL_NR": 172,
   "BROKER_KICK_OBSERVED": true,
-  "PRODUCTION_AUTHORITY_PUMP_OBSERVED": true,
+  "PRODUCTION_SERVICE_BROKER_KICK_USED": true,
   "REAL_KERNEL_ENTRY_OBSERVED": true,
   "REQUEST_ID_MATCH": true,
   "GENERATION_CONTRACT_VALID": true,
