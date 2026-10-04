@@ -1,0 +1,62 @@
+{
+  "schema": "k5-clean-three-run-certification-manifest-v1",
+  "K5_STATUS": "PASS",
+  "verdict": "PASS",
+  "REAL_CHILD_LIFECYCLE": true,
+  "sourceRepository": "JoyciAkira/linux",
+  "sourceBranch": "fix/kwa-single-authority-v2",
+  "sourceCommit": "614660e7e657ef270b2260f1cdffe7a8f606650e",
+  "sourceTreeStatusBeforeRun": "clean",
+  "kernelWasmSha256": "d0fbadc4cdc1c9caf1be67de5f2e8d59991408df83a936251597592a403a8ce1",
+  "timestamp": "2026-10-04T22:32:26.463Z",
+  "K5_RUN_COUNT": 3,
+  "K5_RUN_PASS_COUNT": 3,
+  "PARENT_PID": 1,
+  "CHILD_PID": 19,
+  "CHILD_EXIT_CODE": 37,
+  "WAIT4_RAW_STATUS": 9472,
+  "WAIT4_EXIT_STATUS": 37,
+  "runIds": [
+    "ad5f35cfc46ec56a000260bf0969f304",
+    "3268d41caa3181a69d19d5e9d10f0027",
+    "dba1818f3d860ebbefab0e4b157d2097"
+  ],
+  "runReceipts": [
+    {
+      "run": 1,
+      "runId": "ad5f35cfc46ec56a000260bf0969f304",
+      "file": "k5-clean-run-1-receipt.json",
+      "sha256": "571595bf4b60a235a792f8b474e195f061331f47cd8180ad267e4bd5874fdcf6",
+      "verdict": "PASS",
+      "checks": 25,
+      "errors": 0
+    },
+    {
+      "run": 2,
+      "runId": "3268d41caa3181a69d19d5e9d10f0027",
+      "file": "k5-clean-run-2-receipt.json",
+      "sha256": "e1134ac1cb8114d7d5e546a850dbdb0a249665fda7b717c4e0447c03e5ee89fa",
+      "verdict": "PASS",
+      "checks": 25,
+      "errors": 0
+    },
+    {
+      "run": 3,
+      "runId": "dba1818f3d860ebbefab0e4b157d2097",
+      "file": "k5-clean-run-3-receipt.json",
+      "sha256": "d121246ae6f40b4d85bf4f748b14b4b088b68a4770fdb0a2c94a76a06ac7a56a",
+      "verdict": "PASS",
+      "checks": 25,
+      "errors": 0
+    }
+  ],
+  "checksSummary": {
+    "totalRequiredChecks": 25,
+    "run1Passed": 25,
+    "run2Passed": 25,
+    "run3Passed": 25,
+    "allChecksSatisfied": true
+  },
+  "KWA_CORRECTNESS": "NOT_PROVEN",
+  "PRODUCTION_READY": false
+}
