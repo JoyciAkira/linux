@@ -335,3 +335,29 @@ export function authorityPump(
 
   return processed;
 }
+
+/**
+ * K4R2: Production broker_kick servicing function, extracted from Machine.boot()
+ * so that both Machine.onmessage and external witnesses (e.g. K4 E2E) invoke the
+ * SAME authoritative code path. This is not a simulation or wrapper — it is the
+ * production authority pump invocation with real kernel identity.
+ *
+ * Placed here (not in index.ts) because index.ts has top-level fetch() side effects
+ * that prevent Node.js import; kwa-broker.ts is side-effect-free.
+ *
+ * @param syscallFn - Function to invoke kernel syscall(nr, a0..a5)
+ * @param brokerSab - The shared broker SAB for request/response routing
+ * @param kernelIdentity - Accessors for real kernel task identity
+ */
+export function serviceBrokerKick(
+  syscallFn: (nr: number, a0: number, a1: number, a2: number, a3: number, a4: number, a5: number) => number,
+  brokerSab: SharedArrayBuffer,
+  kernelIdentity: { getPid: () => number; getTgid?: () => number; getGeneration: () => number },
+): void {
+  const getTgid = kernelIdentity.getTgid ?? (() => 0);
+  authorityPump(syscallFn, brokerSab, {
+    getPid: kernelIdentity.getPid,
+    getTgid,
+    getGeneration: kernelIdentity.getGeneration,
+  });
+}

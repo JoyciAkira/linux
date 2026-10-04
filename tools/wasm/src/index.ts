@@ -9,7 +9,7 @@ import {
   type RawKernelProcessEvent,
   type RawProcessEventMessage,
 } from "./process-events.ts";
-import { authorityPump, createBrokerSab } from "./kwa-broker.ts";
+import { authorityPump, createBrokerSab, serviceBrokerKick } from "./kwa-broker.ts";
 export {
   BlockDevice,
   type BlockDeviceStorage,
@@ -372,18 +372,17 @@ export class Machine extends EventEmitter<{
             break;
           }
           case "broker_kick": {
-            // K4R: Production authority pump triggered by secondary worker
+            // K4R2: Delegate to extracted production function (shared with witness)
             const exports = instance.exports as Record<string, unknown>;
-            const getTgid = typeof exports.kwa_get_last_tgid === "function"
-              ? () => (exports.kwa_get_last_tgid as () => number)()
-              : () => 0;
-            authorityPump(
+            serviceBrokerKick(
               (nr, a0, a1, a2, a3, a4, a5) =>
-                instance.exports.syscall(nr, a0, a1, a2, a3, a4, a5),
+                (exports.syscall as Function)(nr, a0, a1, a2, a3, a4, a5),
               this.#brokerSab,
               {
                 getPid: () => (exports.kwa_get_last_pid as () => number)(),
-                getTgid,
+                getTgid: typeof exports.kwa_get_last_tgid === "function"
+                  ? () => (exports.kwa_get_last_tgid as () => number)()
+                  : () => 0,
                 getGeneration: () => (exports.kwa_get_last_generation as () => number)(),
               },
             );
@@ -494,3 +493,4 @@ export class Machine extends EventEmitter<{
     instance.exports.boot();
   }
 }
+

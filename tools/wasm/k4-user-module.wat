@@ -73,4 +73,7 @@
 
   ;; Also export _start directly for non-table-based invocation
   (export "_start" (func $_start_impl))
+ ;; Export pointer to result buffer so witness can read exact syscall return values
+ ;; Layout: [result0:i32, result1:i32, result2:i32, call_count:i32] at offset 0
+ (global $result_buffer_ptr (export "result_buffer") i32 (i32.const 0))
 )
