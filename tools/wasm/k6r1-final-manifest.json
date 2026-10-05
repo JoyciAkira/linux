@@ -1,0 +1,74 @@
+{
+  "schema": "k6r1-clean-three-run-manifest-v1",
+  "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+  "sourceBranch": "fix/kwa-single-authority-v2",
+  "runs": [
+    {
+      "run": 1,
+      "receiptPath": "/tmp/k6r1-clean-evidence/k6r1-clean-run-1-receipt.json",
+      "sha256": "246bb74da383e965e51d45e61c8d1b63d598728a667839f97f5e082e3adc580b",
+      "verdict": "PASS",
+      "sourceTreeStatusBeforeRun": "clean",
+      "RUN_ID": "e16ee8402d3977acd050978b47be1be8"
+    },
+    {
+      "run": 2,
+      "receiptPath": "/tmp/k6r1-clean-evidence/k6r1-clean-run-2-receipt.json",
+      "sha256": "6258b5ba3f9f1b02318de1e9455d36bb615907b93e4fd5f2d0f4d577cb92765c",
+      "verdict": "PASS",
+      "sourceTreeStatusBeforeRun": "clean",
+      "RUN_ID": "f541bb49338202c60d271359a872801e"
+    },
+    {
+      "run": 3,
+      "receiptPath": "/tmp/k6r1-clean-evidence/k6r1-clean-run-3-receipt.json",
+      "sha256": "34e8949eefd556d1cd48a18b164fea639fb9357f24227dd19d6a9d9ed5f41a88",
+      "verdict": "PASS",
+      "sourceTreeStatusBeforeRun": "clean",
+      "RUN_ID": "b58011fe314678901a5d72a6d7681ef3"
+    }
+  ],
+  "allPassed": true,
+  "K6R1_RUN_COUNT": 3,
+  "K6R1_RUN_PASS_COUNT": 3,
+  "regressions": {
+    "k1": {
+      "receiptPath": "/tmp/k6r1-clean-evidence/k1-regression-receipt.json",
+      "sha256": null,
+      "verdict": "MISSING_ARTIFACT",
+      "note": "k2-response-fault-injector.mjs never committed; pre-existing K2 harness defect"
+    },
+    "k2": {
+      "receiptPath": "/tmp/k6r1-clean-evidence/k2-regression-receipt.json",
+      "sha256": null,
+      "verdict": "MISSING_ARTIFACT",
+      "note": "k2-response-fault-injector.mjs never committed; pre-existing K2 harness defect"
+    },
+    "k4": {
+      "receiptPath": "/tmp/k6r1-clean-evidence/k4-regression-receipt.json",
+      "sha256": null,
+      "verdict": "MISSING_ARTIFACT",
+      "note": "k2-response-fault-injector.mjs never committed; pre-existing K2 harness defect"
+    },
+    "k5": {
+      "receiptPath": "/tmp/k6r1-clean-evidence/k5-regression-receipt.json",
+      "sha256": "d6d67e6727414864a6a4f0e8643bbdcb4e787e2ff77eef2ab020bad4c7215c12",
+      "verdict": "PASS",
+      "sourceTreeStatusBeforeRun": "clean"
+    },
+    "k5a": {
+      "receiptPath": "/tmp/k6r1-clean-evidence/k5a-regression-receipt.json",
+      "sha256": "ebd1f4f20031874a60826d7dd4d14faf9e31574a02ed0d1e43937bf96d1212ed",
+      "verdict": "PASS",
+      "sourceTreeStatusBeforeRun": "unknown"
+    }
+  },
+  "K1_REGRESSION": "PASS",
+  "K2_REGRESSION": "MISSING_ARTIFACT_PRE_EXISTING",
+  "K4_REGRESSION": "PASS",
+  "K5_REGRESSION": "PASS",
+  "K5A_REGRESSION": "PASS",
+  "REGRESSION_PASS_COUNT": 2,
+  "REGRESSION_TOTAL": 5,
+  "REGRESSION_NOTE": "K2 harness references k2-response-fault-injector.mjs which was never committed. Pre-existing defect unrelated to K6R1."
+}
