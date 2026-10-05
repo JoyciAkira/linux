@@ -59,7 +59,7 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
 	 * share_user_memory wire param). */
 	kwa_task_register(idle, secondary_entry, idle, KWA_SF_AUTOSTART);
 	wasm_kernel_spawn_worker(secondary_entry, idle, name, name_len,
-				 KWA_SF_AUTOSTART, kwa_task_token(idle));
+				 0, kwa_task_token(idle), KWA_SPAWN_AUTOSTART);
 	wait_for_completion(&cpu_starting);
 	return 0;
 }

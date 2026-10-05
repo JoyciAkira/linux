@@ -72,7 +72,7 @@ __attribute__((export_name("boot"))) void __init _start(void)
 	 * idle's opaque self/next token resolves to this same slot. */
 	kwa_boot_register(&init_task, do_start_kernel);
 	wasm_kernel_spawn_worker(do_start_kernel, NULL, "boot",
-				 sizeof "boot" - 1, false, 0);
+				 sizeof "boot" - 1, false, 0, 0);
 }
 
 void __init setup_arch(char **cmdline_p)
