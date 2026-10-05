@@ -29,6 +29,10 @@ export declare const SLOT_SIZE = 112;
 export declare const SLOTS_OFF = 64;
 export declare const OFF: {
     readonly MAGIC: 0;
+    /** K5: completion had no matching pending dispatch — result dropped, never faked. */
+    readonly UNATTRIBUTED_RESPONSE_COUNT: 1;
+    /** K5: finish_task terminal cancellations of outstanding claimed slots. */
+    readonly TERMINAL_CANCEL_COUNT: 2;
     readonly BOOT_COUNT: 8;
     readonly SECONDARY_INST_COUNT: 9;
     readonly POST_FREE_DISPATCH_COUNT: 10;
@@ -60,6 +64,10 @@ export declare const S: {
     readonly KERNEL_PID: 72;
     readonly KERNEL_TGID: 76;
     readonly KERNEL_GENERATION: 80;
+    /** K5: echo of the client's slot GENERATION snapshot at CLAIM time.
+     * Consumer requires RESP_GENERATION === its local reservation generation
+     * (ABA/stale-slot guard), alongside KERNEL_GENERATION kernel truth. */
+    readonly RESP_GENERATION: 84;
 };
 export declare const idx: (slot: number, off: number) => number;
 export declare function assertBrokerLayout(): void;
@@ -82,3 +90,21 @@ export declare function authorityPump(syscallFn: (nr: number, a0: number, a1: nu
     getTgid: () => number;
     getGeneration: () => number;
 }): number;
+/**
+ * K4R2: Production broker_kick servicing function, extracted from Machine.boot()
+ * so that both Machine.onmessage and external witnesses (e.g. K4 E2E) invoke the
+ * SAME authoritative code path. This is not a simulation or wrapper — it is the
+ * production authority pump invocation with real kernel identity.
+ *
+ * Placed here (not in index.ts) because index.ts has top-level fetch() side effects
+ * that prevent Node.js import; kwa-broker.ts is side-effect-free.
+ *
+ * @param syscallFn - Function to invoke kernel syscall(nr, a0..a5)
+ * @param brokerSab - The shared broker SAB for request/response routing
+ * @param kernelIdentity - Accessors for real kernel task identity
+ */
+export declare function serviceBrokerKick(syscallFn: (nr: number, a0: number, a1: number, a2: number, a3: number, a4: number, a5: number) => number, brokerSab: SharedArrayBuffer, kernelIdentity: {
+    getPid: () => number;
+    getTgid?: () => number;
+    getGeneration: () => number;
+}): void;

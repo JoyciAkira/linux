@@ -31,7 +31,7 @@ void wasm_import(kernel, get_stacktrace)(char *buf, size_t size);
  *                     returns. All other tokens: registration only. */
 void wasm_import(kernel, spawn_worker)(int (*fn)(void *), void *arg,
 				       char *name, size_t name_len, u32 share_user_memory,
-				       u32 task_token);
+				       u32 task_token, u32 spawn_flags);
 
 void wasm_import(kernel, run_on_main)(void (*fn)(void *), void *arg);
 
@@ -75,7 +75,9 @@ void wasm_import(kernel, process_event)(u32 event_kind, u64 run_id_hi, u64 run_i
 
 int wasm_import(user, compile)(u8 *bytes, u32 len);
 void wasm_import(user, instantiate)(bool fresh_memory);
-void wasm_import(user, call)(void);
+int wasm_import(user, call)(void);
+#define KWA_USER_CALL_RETURNED 0
+#define KWA_USER_CALL_TRAP     1
 void wasm_import(user, switch_entry)(u32 fn, u32 arg);
 void wasm_import(user, call_signal_handler)(u32 fn, u32 sig);
 void wasm_import(user, halt_signal_handler)(void);

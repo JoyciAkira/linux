@@ -101,7 +101,7 @@ export type WorkerMessage =
   | { type: "fork_copied"; pid: number; taskToken: number }
   /** K5: user worker ended abnormally (image returned without exit / trap);
    * the authority rejects that task's user.call with the real error. */
-  | { type: "user_task_error"; taskToken: number; reason: string }
+  | { type: "user_task_error"; taskToken: number; reason: string; faultClass: "wasm_trap" | "returned_without_exit" }
   /** K5: main → authority: fork ack relay (from a user worker's fork_copied). */
   | { type: "authority_fork_copied"; pid: number }
   /** K5: main → authority: device IRQ relay — deliver through the kernel. */
@@ -183,7 +183,7 @@ let authorityHandlers: {
   forkCopied: (pid: number) => void;
   irq: (cpu: number, irq: number) => void;
   virtioResult: (seq: number, ok: boolean, value: number) => void;
-  userTaskError: (taskToken: number, reason: string) => void;
+  userTaskError: (taskToken: number, reason: string, faultClass: "wasm_trap" | "returned_without_exit") => void;
 } | null = null;
 
 function isInitMessage(data: unknown): data is InitMessage {
@@ -684,7 +684,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
       return;
     }
     if (data.type === "user_task_error") {
-      if (authorityHandlers) authorityHandlers.userTaskError(data.taskToken, data.reason);
+      if (authorityHandlers) authorityHandlers.userTaskError(data.taskToken, data.reason, data.faultClass);
       else postK5Diag("USER_TASK_ERROR_UNBOUND", false, { taskToken: data.taskToken, reason: data.reason });
       return;
     }
@@ -790,7 +790,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
         userWorkerId: number;
         /** In-flight user.call suspension of this task's kernel stack. */
         pendingCall: {
-          resolve: () => void;
+          resolve: (outcome?: number) => void;
           reject: (reason: unknown) => void;
         } | null;
       }
@@ -1498,15 +1498,24 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           if (ok) pending.resolve(value);
           else pending.reject(new Error(`virtio op failed (seq=${seq})`));
         },
-        userTaskError(taskToken: number, reason: string) {
+        userTaskError(taskToken: number, reason: string, faultClass: "wasm_trap" | "returned_without_exit") {
           const t = tasks.get(taskToken);
           if (!t?.pendingCall) {
-            postK5Diag("USER_TASK_ERROR_UNBOUND", false, { taskToken, reason });
+            postK5Diag("USER_TASK_ERROR_UNBOUND", false, { taskToken, reason, faultClass });
             return;
           }
           const pc = t.pendingCall;
           t.pendingCall = null;
-          pc.reject(new Error(`user image failed: ${reason}`));
+          // K6R1 typed trap completion: resolve (NEVER reject — that would
+          // destroy the JSPI continuation) so the SAME kernel continuation
+          // resumes in kwa_enter_user_image. wasm_trap → user.call returns
+          // KWA_USER_CALL_TRAP(1) → do_exit(SIGSEGV); returned_without_exit
+          // → 0 → falls through to the do_exit(0) first-lifecycle path.
+          postK5Diag(faultClass === "wasm_trap" ? "CHILD_WASM_TRAP_CAUGHT" : "USER_IMAGE_RETURNED", true, {
+            taskToken,
+            reason: reason.slice(0, 120),
+          });
+          pc.resolve(faultClass === "wasm_trap" ? 1 : 0);
         },
       };
       authorityHandlers = handlers;
@@ -1524,7 +1533,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
         return t;
       };
 
-      const userCall = (): Promise<void> => {
+      const userCall = (): Promise<number> => {
         const t = currentTask();
         if (!t.userModule || !t.userMemory) {
           throw new Error(
@@ -1552,8 +1561,8 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           if (t.userWorkerId !== 0) workerIdToTask.delete(t.userWorkerId);
           t.userWorkerId = 0;
         }
-        const promise = new Promise<void>((resolve, reject) => {
-          t.pendingCall = { resolve, reject };
+        const promise = new Promise<number>((resolve, reject) => {
+          t.pendingCall = { resolve: resolve as (outcome?: number) => void, reject };
         });
         spawnUserWorker(t);
         return promise;
@@ -1608,14 +1617,13 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           onFinishTask: finishTask,
           onSyscallComplete,
           onHaltWorker,
-          spawnWorkerRaw(fn, arg, name, spawnFlags, taskToken) {
+          spawnWorkerRaw(fn, arg, name, shareUserMemory, taskToken, spawnFlags) {
             // Registration ONLY for normal tasks: continuations start when
             // the kernel names the token as nextTask — never on spawn.
             // token==0 is the boot task: registered now, started when
             // exports.boot returns (shareUserMemory=0 there, never decoded
-            // as autostart). KWA_SF_AUTOSTART (bit1 0x2, KernelContext):
-            // secondary-idle spawns start kwa_task_entry immediately; idle
-            // tasks get no user worker and no workerId binding.
+            // as autostart). K6R1 ABI v2: spawn_flags is a dedicated param;
+            // bit0 0x1 = KWA_SPAWN_AUTOSTART (fork children, secondary idle).
             if (tasks.has(taskToken)) {
               throw new Error(
                 `[K5] duplicate kernel taskToken ${taskToken} for ${name}`,
@@ -1645,7 +1653,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
               arg,
               inheritFrom: executingTask,
             });
-            if (taskToken !== 0 && (spawnFlags & 0x2) !== 0) {
+            if (taskToken !== 0 && (spawnFlags & 0x1) !== 0) {
               const idleTask = tasks.get(taskToken)!;
               postK5Diag("TASK_AUTOSTART", true, { taskToken, name });
               const prevExecuting = executingTask;
@@ -2058,7 +2066,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
  // the kernel continuation rejects with it (never a fabricated result).
  if (taskToken) {
  try {
- postMessage({ type: "user_task_error", taskToken, reason: String((entryError as Error)?.message ?? entryError).slice(0, 300) });
+          postMessage({ type: "user_task_error", taskToken, reason: String((entryError as Error)?.message ?? entryError).slice(0, 300), faultClass: "wasm_trap" });
  } catch { /* best-effort */ }
  }
  throw entryError;
@@ -2067,7 +2075,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
  // K5: a guest entrypoint that returns normally without exiting the task is
  // an abnormal end for that task's user image.
  try {
- postMessage({ type: "user_task_error", taskToken, reason: "entrypoint_returned_without_exit" });
+    postMessage({ type: "user_task_error", taskToken, reason: "entrypoint_returned_without_exit", faultClass: "returned_without_exit" });
  } catch { /* best-effort */ }
  }
  signalWorkerDone("entrypoint_returned");

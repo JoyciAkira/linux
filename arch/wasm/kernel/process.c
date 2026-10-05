@@ -93,8 +93,11 @@ void kwa_enter_user_image(struct task_struct *task)
 	 *   same way; real death is exclusively finish_task/TERMINAL_TASK_EXIT.
 	 * Only a NORMAL return (user module ended without kernel-driven exit)
 	 * reaches the code below. */
-	wasm_user_call();
+	int user_call_outcome = wasm_user_call();
 	kwa_ctx_restore_raw(&entry);
+	if (user_call_outcome == KWA_USER_CALL_TRAP) {
+		do_exit(SIGSEGV);
+	}
 
 	/* G12 fix: if the task already exited through another path (execve
 	 * handoff, signal death), never call do_exit() again from this
@@ -243,10 +246,16 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 	if (!slot)
 		return -ENOMEM;
 
+	/* K6R1 ABI v2: dedicated spawn_flags (scheduling policy only). Fork
+	 * children get 0 — the scheduler names them via wake_up_new_task/
+	 * __switch_to (K5-proven); autostart here would run the child before
+	 * alloc_pid, so wasm_fork_continue would see current->pid == 0. Only
+	 * secondary idle tasks (smp.c) autostart. */
 	wasm_kernel_spawn_worker(args->fn, args->fn_arg,
 				 name, name_len,
 				 args->fn == wasm_call_clone_fn,
-				 kwa_task_token(p));
+				 kwa_task_token(p),
+				 0);
 
 	return 0;
 }

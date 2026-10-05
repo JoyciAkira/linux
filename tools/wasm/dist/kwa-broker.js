@@ -29,6 +29,10 @@ export const SLOT_SIZE = 112;
 export const SLOTS_OFF = 64;
 export const OFF = {
     MAGIC: 0,
+    /** K5: completion had no matching pending dispatch — result dropped, never faked. */
+    UNATTRIBUTED_RESPONSE_COUNT: 1,
+    /** K5: finish_task terminal cancellations of outstanding claimed slots. */
+    TERMINAL_CANCEL_COUNT: 2,
     BOOT_COUNT: 8,
     SECONDARY_INST_COUNT: 9,
     POST_FREE_DISPATCH_COUNT: 10,
@@ -60,6 +64,10 @@ export const S = {
     KERNEL_PID: 72,
     KERNEL_TGID: 76,
     KERNEL_GENERATION: 80,
+    /** K5: echo of the client's slot GENERATION snapshot at CLAIM time.
+     * Consumer requires RESP_GENERATION === its local reservation generation
+     * (ABA/stale-slot guard), alongside KERNEL_GENERATION kernel truth. */
+    RESP_GENERATION: 84,
 };
 export const idx = (slot, off) => (SLOTS_OFF + slot * SLOT_SIZE + off) >> 2;
 export function assertBrokerLayout() {
@@ -98,10 +106,18 @@ export class BrokerClient {
     #workerId;
     #reqSeq = 1;
     #slotGen = new Uint32Array(N_SLOTS);
+    /** K5: highest C-stamped KERNEL_GENERATION accepted by this client.
+     * Responses with zero or non-increasing kernel generation are replays. */
+    #lastKernelGen = 0;
     constructor(sab, workerId) {
         this.#i32 = new Int32Array(sab);
         this.#u32 = new Uint32Array(sab);
         this.#workerId = workerId;
+    }
+    #freeRejectedSlot(si, slot) {
+        Atomics.store(this.#i32, si, STATE.FREE);
+        Atomics.store(this.#u32, idx(slot, S.OWNER), 0);
+        Atomics.notify(this.#i32, si, 1);
     }
     syscall(nr, a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, taskId = 0, tid = 0) {
         const resp = this.invoke(nr, a0, a1, a2, a3, a4, a5, taskId, tid);
@@ -163,6 +179,7 @@ export class BrokerClient {
         const rKernelPid = Atomics.load(this.#i32, idx(slot, S.KERNEL_PID));
         const rKernelTgid = Atomics.load(this.#i32, idx(slot, S.KERNEL_TGID));
         const rKernelGen = Atomics.load(this.#u32, idx(slot, S.KERNEL_GENERATION));
+        const rRespGen = Atomics.load(this.#u32, idx(slot, S.RESP_GENERATION));
         // K2: Validate kernel-authoritative identity
         // Caller-supplied taskId/tid are NON-AUTHORITATIVE; kernel truth wins.
         // If kernel stamped identity (non-zero), caller claims are ignored.
@@ -177,15 +194,33 @@ export class BrokerClient {
             Atomics.notify(this.#i32, si, 1);
             return { result: -1, errno: 38, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
         }
-        // K2R: Fail-closed generation check — stale or zero generation is rejected
-        const expectedGen = this.#slotGen[slot];
-        if (rKernelGen === 0 || rKernelGen !== expectedGen) {
-            Atomics.add(this.#u32, OFF.STALE_TASK_REQUEST_COUNT, 1);
+        // K5: RESP_GENERATION must echo this client's reservation generation for
+        // this exact slot use (ABA/stale-slot guard across slot reuse).
+        if (rRespGen !== (this.#slotGen[slot] ?? 0)) {
+            Atomics.add(this.#u32, OFF.ABA_REJECT_COUNT, 1);
             Atomics.store(this.#i32, si, STATE.FREE);
             Atomics.store(this.#u32, idx(slot, S.OWNER), 0);
             Atomics.notify(this.#i32, si, 1);
             return { result: -1, errno: 38, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
         }
+        // K5: KERNEL_GENERATION is C-stamped global monotonic kernel truth —
+        // zero (unstamped) or non-increasing (replayed) values are rejected,
+        // EXCEPT the authority's registry-dead transport rejection (-ESRCH):
+        // the syscall never ran, so this is a transport error, not a Linux
+        // result and never a fabricated status.
+        if (rKernelGen === 0) {
+            if (!(rResult === -1 && rErrno === 3)) {
+                Atomics.add(this.#u32, OFF.STALE_TASK_REQUEST_COUNT, 1);
+                this.#freeRejectedSlot(si, slot);
+                return { result: -1, errno: 38, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
+            }
+        }
+        else if (rKernelGen <= this.#lastKernelGen) {
+            Atomics.add(this.#u32, OFF.STALE_TASK_REQUEST_COUNT, 1);
+            this.#freeRejectedSlot(si, slot);
+            return { result: -1, errno: 38, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
+        }
+        this.#lastKernelGen = rKernelGen;
         // 4. Consume and FREE
         if (Atomics.compareExchange(this.#i32, si, STATE.COMPLETED, STATE.CONSUMED) !== STATE.COMPLETED) {
             Atomics.add(this.#u32, OFF.BROKER_ERRORS, 1);
@@ -250,9 +285,33 @@ export function authorityPump(syscallFn, sab, kernelIdentity) {
         Atomics.store(i32, idx(s, S.KERNEL_PID), kPid);
         Atomics.store(i32, idx(s, S.KERNEL_TGID), kTgid);
         Atomics.store(u32, idx(s, S.KERNEL_GENERATION), kGen);
+        // K5: Echo the client's slot GENERATION captured at CLAIM time so the
+        // consumer can enforce exact RESP_GENERATION matching (ABA/stale-slot).
+        Atomics.store(u32, idx(s, S.RESP_GENERATION), Atomics.load(u32, idx(s, S.GENERATION)));
         Atomics.store(i32, si, STATE.COMPLETED);
         Atomics.notify(i32, si, 1);
         processed++;
     }
     return processed;
+}
+/**
+ * K4R2: Production broker_kick servicing function, extracted from Machine.boot()
+ * so that both Machine.onmessage and external witnesses (e.g. K4 E2E) invoke the
+ * SAME authoritative code path. This is not a simulation or wrapper — it is the
+ * production authority pump invocation with real kernel identity.
+ *
+ * Placed here (not in index.ts) because index.ts has top-level fetch() side effects
+ * that prevent Node.js import; kwa-broker.ts is side-effect-free.
+ *
+ * @param syscallFn - Function to invoke kernel syscall(nr, a0..a5)
+ * @param brokerSab - The shared broker SAB for request/response routing
+ * @param kernelIdentity - Accessors for real kernel task identity
+ */
+export function serviceBrokerKick(syscallFn, brokerSab, kernelIdentity) {
+    const getTgid = kernelIdentity.getTgid ?? (() => 0);
+    authorityPump(syscallFn, brokerSab, {
+        getPid: kernelIdentity.getPid,
+        getTgid,
+        getGeneration: kernelIdentity.getGeneration,
+    });
 }

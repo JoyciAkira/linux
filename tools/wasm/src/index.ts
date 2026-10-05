@@ -427,6 +427,7 @@ export class Machine extends EventEmitter<{
               type: "user_task_error",
               taskToken: event.data.taskToken,
               reason: event.data.reason,
+              faultClass: event.data.faultClass,
             });
             break;
           case "virtio_cmd": {

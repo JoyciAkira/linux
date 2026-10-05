@@ -85,7 +85,8 @@ void kwa_enter_user_image(struct task_struct *task);
 /* K5: kernel task registry — C-owned validation of host-supplied tokens. */
 #define KWA_TASK_SLOTS 64
 #define KWA_SF_STARTED 0x1   /* kwa_task_entry ran for it */
-#define KWA_SF_AUTOSTART 0x2 /* host starts it immediately (boot, secondary idle) */
+#define KWA_SF_AUTOSTART 0x2 /* registry flag: host starts via kwa_task_entry immediately */
+#define KWA_SPAWN_AUTOSTART 0x1 /* wire spawn_flags param: host autostarts this token */
 
 struct kwa_task_slot {
 	u32 token;

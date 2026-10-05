@@ -64,6 +64,7 @@ export interface Imports {
       comm_len: number,
       share_user_memory: number,
       taskToken: number,
+      spawn_flags: number,
     ): void;
     /** K5A: cooperative yield — 4-arg shared C ABI. selfTask/nextTask are
      * opaque KERNEL-OWNED task addresses (not host PID claims). With authority
@@ -218,17 +219,18 @@ export function kernel_imports(
       user_module: WebAssembly.Module | null,
       user_memory: WebAssembly.Memory | null,
     ) => void;
-    /** K5: raw spawn hook — receives the decoded comm name, the RAW
-     * spawn-flags i32 (bit0 = share user memory for clone-with-fn threads;
-     * bit1 0x2 = KWA_SF_AUTOSTART → start kwa_task_entry immediately) and the
-     * KERNEL-OWNED taskToken. When provided the authority fully owns spawn
-     * disposition and the adapted callback is not invoked. */
+    /** K6R1: raw spawn hook — receives the decoded comm name, share_user_memory
+     * (memory topology only), KERNEL-OWNED taskToken, and spawn_flags
+     * (scheduling policy only; bit0 0x1 = KWA_SPAWN_AUTOSTART). When provided
+     * the authority fully owns spawn disposition and the adapted callback is
+     * not invoked. */
     spawnWorkerRaw?: (
       fn: number,
       arg: number,
       name: string,
-      spawnFlags: number,
+      shareUserMemory: number,
       taskToken: number,
+      spawnFlags: number,
     ) => void;
     boot_console_write: (message: ArrayBuffer) => void;
     boot_console_close: () => void;
@@ -347,13 +349,13 @@ export function kernel_imports(
       mem.set(trace.slice(0, size), buf);
     },
 
-    spawn_worker: (fn, arg, comm, comm_len, share_user_memory, taskToken) => {
+    spawn_worker: (fn: number, arg: number, comm: number, comm_len: number, share_user_memory: number, taskToken: number, spawn_flags: number) => {
       const name = new TextDecoder().decode(
         mem.slice(comm, comm + comm_len),
       );
       if (spawnWorkerRaw) {
-        // Raw flags i32: bit0 = share user memory, bit1 = KWA_SF_AUTOSTART.
-        spawnWorkerRaw(fn, arg, name, share_user_memory | 0, taskToken);
+        // K6R1 ABI v2: share_user_memory and spawn_flags are separate params.
+        spawnWorkerRaw(fn, arg, name, share_user_memory | 0, taskToken, spawn_flags ?? 0);
         return;
       }
       if (!spawn_worker) {
