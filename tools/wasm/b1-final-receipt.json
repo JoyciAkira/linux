@@ -1,0 +1,108 @@
+{
+  "schema": "kwa-b1-provenance-receipt-v2",
+  "verdict": "PASS",
+  "B1_STATUS": "PASS",
+  "Z1_STATUS": "READY",
+  "REPRODUCIBLE_BUILD": true,
+  "SOURCE_TO_ARTIFACT_BINDING": "PROVEN",
+  "source": {
+    "repository": "JoyciAkira/linux",
+    "branch": "fix/kwa-single-authority-v2",
+    "commit": "381e56bb4d9b694e05f456dd90e62af0b2bf6826",
+    "treeSha": "59ba33115726e217999c706839bd9c0670eb77ef",
+    "cleanBeforeAndAfterEachBuild": true,
+    "submodules": []
+  },
+  "recoveredSource": {
+    "recoveryRequired": true,
+    "historicalReceiptSourceBindingCorrect": false,
+    "historicalReceiptSourceCommitClaim": "e2301d96c41f050f032efe427c011dd105709f7d",
+    "recoveryCommit": "381e56bb4d9b694e05f456dd90e62af0b2bf6826",
+    "recoveryPatchSha256": "aef0c8936975ef519ec9f408753ba859383ea5d5085e90afb10cd6d62c31d076",
+    "abiAudit": "tools/wasm/b1-abi-audit.json"
+  },
+  "frozenArtifact": {
+    "path": "tools/wasm/vmlinux.wasm",
+    "sha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1",
+    "bytes": 3718924
+  },
+  "toolchain": {
+    "clang": {"version": "Homebrew clang 23.1.0", "path": "/opt/homebrew/opt/llvm/bin/clang", "sha256": "4e4fd968922cd634ebb6445325703a6276effde7b39337a6a9ff40b3b0c657b8"},
+    "wasmLd": {"version": "Homebrew LLD 23.1.0", "path": "/opt/homebrew/opt/llvm/bin/wasm-ld", "sha256": "745f1b0e8809caef992e6136402561787d951cafe3d0d1736bdc7c03be41e98b"},
+    "llvmArSha256": "20bf95222345e846483af09868180d0005a83f70e7df3503e25df9280333e33e",
+    "llvmNmSha256": "d00111ce5326974f4c2e216a7d3581ed38e72d898528f7d55aec51d31fd5b2c1",
+    "llvmObjcopySha256": "062537ef66839da7afc09b75cc09f89c8c392b5574278b230244cba56327e029",
+    "make": "GNU Make 3.81",
+    "sdk": {"path": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk", "version": "26.5"},
+    "gnuDate": {"version": "coreutils 9.11", "path": "/opt/homebrew/opt/coreutils/libexec/gnubin/date", "sha256": "01f1fd02f5520e19a32a1e8408767e500e038638d989dad4af84fbbf159ba031"}
+  },
+  "environment": {
+    "platform": "Darwin 25.4.0 arm64",
+    "SDKROOT": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+    "KBUILD_BUILD_TIMESTAMP": "unset globally; scoped only inside cmd_initfs",
+    "initramfsTimestamp": "2026-10-05T16:16:08Z",
+    "initramfsEpoch": 1791216968,
+    "SOURCE_DATE_EPOCH": "unset",
+    "LANG": "en_US.UTF-8",
+    "LC_ALL": "unset",
+    "TZ": "unset",
+    "TMPDIR": "unset",
+    "fingerprintSha256": "0b619d541c2fb6081e8237d7845e2b6371b00ba79c096ff1c156c2c102e43737"
+  },
+  "buildCommand": "export PATH=\"/opt/homebrew/opt/coreutils/libexec/gnubin:$PATH\" SDKROOT=\"/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk\" HOSTCC=\"/opt/homebrew/opt/llvm/bin/clang\" HOSTCFLAGS=\"-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -I/opt/homebrew/include\" LLVM_PREFIX=\"/opt/homebrew/opt/llvm/bin/\"; unset KBUILD_BUILD_TIMESTAMP; make ARCH=wasm LLVM=1 LLVM_PREFIX=\"/opt/homebrew/opt/llvm/bin/\" HOSTCC=\"/opt/homebrew/opt/llvm/bin/clang\" HOSTCFLAGS=\"-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -I/opt/homebrew/include\" \"cmd_initfs=KBUILD_BUILD_TIMESTAMP=2026-10-05T16:16:08Z /bin/sh usr/gen_initramfs.sh -o usr/initramfs_data.cpio -l usr/.initramfs_data.cpio.d ./usr/default_cpio_list\" -j1 tools/wasm/vmlinux.wasm",
+  "builds": [
+    {"runId": "A", "startUtc": "2026-10-05T22:23:48Z", "sourceTreeStatusBeforeRun": "clean", "sourceTreeStatusAfterRun": "clean", "sourceCommit": "381e56bb4d9b694e05f456dd90e62af0b2bf6826", "sourceTreeSha": "59ba33115726e217999c706839bd9c0670eb77ef", "configSha256": "d7f4d8a6a6516d4529d5681ec29011f18fbc5d09eaf9fdc5abc2ae2cb90e8a97", "initramfsSha256": "372d2dca8eb190958317801b818b4e30f43c4da0c3167c8835997bd4d2ff22b4", "artifactBytes": 3718924, "artifactSha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1", "sectionManifestSha256": "a267de81595b6bf823f429b0c212660692013774d6193df915790b28fbc07547", "buildLogSha256": "b07a57901ae061d4e7d8d25872413627450a6a01c245a1a09e85889a5cf82042", "runnerExitCode": 1, "makeExitCode": 0, "runnerNote": "Wrapper stopped at a faulty postcondition expecting the tracked output to be modified. Make succeeded and produced the exact committed artifact; the worktree correctly stayed clean."},
+    {"runId": "B", "startUtc": "2026-10-05T22:28:43Z", "sourceTreeStatusBeforeRun": "clean", "sourceTreeStatusAfterRun": "clean", "sourceCommit": "381e56bb4d9b694e05f456dd90e62af0b2bf6826", "sourceTreeSha": "59ba33115726e217999c706839bd9c0670eb77ef", "configSha256": "d7f4d8a6a6516d4529d5681ec29011f18fbc5d09eaf9fdc5abc2ae2cb90e8a97", "initramfsSha256": "372d2dca8eb190958317801b818b4e30f43c4da0c3167c8835997bd4d2ff22b4", "artifactBytes": 3718924, "artifactSha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1", "sectionManifestSha256": "a267de81595b6bf823f429b0c212660692013774d6193df915790b28fbc07547", "buildLogSha256": "b07a57901ae061d4e7d8d25872413627450a6a01c245a1a09e85889a5cf82042", "runnerExitCode": 0, "makeExitCode": 0},
+    {"runId": "C", "startUtc": "2026-10-05T22:31:04Z", "sourceTreeStatusBeforeRun": "clean", "sourceTreeStatusAfterRun": "clean", "sourceCommit": "381e56bb4d9b694e05f456dd90e62af0b2bf6826", "sourceTreeSha": "59ba33115726e217999c706839bd9c0670eb77ef", "configSha256": "d7f4d8a6a6516d4529d5681ec29011f18fbc5d09eaf9fdc5abc2ae2cb90e8a97", "initramfsSha256": "372d2dca8eb190958317801b818b4e30f43c4da0c3167c8835997bd4d2ff22b4", "artifactBytes": 3718924, "artifactSha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1", "sectionManifestSha256": "a267de81595b6bf823f429b0c212660692013774d6193df915790b28fbc07547", "buildLogSha256": "b07a57901ae061d4e7d8d25872413627450a6a01c245a1a09e85889a5cf82042", "runnerExitCode": 0, "makeExitCode": 0}
+  ],
+  "firstDivergence": {
+    "classification": "GENERATED_INPUT_NONDETERMINISM",
+    "boundary": ".linux.initramfs custom section only",
+    "initialObservedMtimes": {"frozen": 1791216968, "BuildB": 1791230713, "BuildA_cleanDefconfig": 1791233423},
+    "cause": "When KBUILD_BUILD_TIMESTAMP is unset or cannot be parsed by date -d, gen_initramfs.sh does not pass -t; gen_init_cpio defaults to time(NULL).",
+    "llvmWasmBackendNondeterminism": "NOT_THE_CAUSE_OF_THE_OBSERVED_DIVERGENCE",
+    "reportPath": "/Volumes/External/DANI/kwa-b1-forensics/20261005T201717Z/B1R8-first-divergence.json",
+    "reportSha256": "4e9378dd7b72254806625bf1a7e3d8e8e60a1aec4cf16896a668e799ee9016cb"
+  },
+  "utsVersionReview": {
+    "status": "RESOLVED_FOR_CURRENT_BUILD_MATRIX",
+    "headerContent": "#define UTS_VERSION \"# SMP \"",
+    "sha256": "1f3db81e6ac8d6b23672bb7fae4a87a78b269f08efab0bf46bc97b59bc5b9664",
+    "reason": "Identical forced-generated init/utsversion-tmp.h in all clean worktrees; version-timestamp.o is absent from init/obj-y."
+  },
+  "checks": {
+    "SOURCE_AUTHORITY_EXACT": true,
+    "SOURCE_TREE_CLEAN_EACH_RUN": true,
+    "CONFIG_IDENTICAL": true,
+    "TOOLCHAIN_IDENTICAL": true,
+    "ENVIRONMENT_CONTROLLED": true,
+    "BUILD_COMMAND_IDENTICAL": true,
+    "BUILD_A_EQ_BUILD_B": true,
+    "BUILD_B_EQ_BUILD_C": true,
+    "MATCHES_FROZEN_K6R1_ARTIFACT": true,
+    "FIRST_DIVERGENCE_IDENTIFIED": true,
+    "NONDETERMINISM_CAUSE_PROVEN": true,
+    "REPRODUCIBLE_BUILD": true
+  },
+  "evidence": {
+    "canonicalFullReceipt": "/Volumes/External/DANI/kwa-b1-forensics/20261005T201717Z/b1-receipt-final.json",
+    "canonicalFullReceiptSha256": "31aca02c7851cf5d741e41068420a05a19d2d0659d70023579dfc492be0d4d38",
+    "sectionManifest": "/Volumes/External/DANI/kwa-b1-forensics/20261005T201717Z/B1R8-final-section-manifest.json",
+    "sectionManifestSha256": "a267de81595b6bf823f429b0c212660692013774d6193df915790b28fbc07547",
+    "buildMatrixValidation": "/Volumes/External/DANI/kwa-b1-forensics/20261005T201717Z/B1R8-final-build-validation.json",
+    "buildMatrixValidationSha256": "59765c1e28b9fc5ab2abee2c522f3f917eef6e33ffa5192315a849329aa8a278",
+    "firstDivergenceReport": "/Volumes/External/DANI/kwa-b1-forensics/20261005T201717Z/B1R8-first-divergence.json",
+    "firstDivergenceReportSha256": "4e9378dd7b72254806625bf1a7e3d8e8e60a1aec4cf16896a668e799ee9016cb",
+    "abiAudit": "/Volumes/External/DANI/kwa-b1-forensics/20261005T201717Z/B1R8-abi-audit.json",
+    "abiAuditSha256": "c17501de20337c18e6ca4c0169ca947a583a2c9811c3cb53d52662fb6a8d8700",
+    "preservedArtifactsAndBuildLogsDirectory": "/Volumes/External/DANI/kwa-b1-forensics/20261005T201717Z/",
+    "allDistinctArtifactSha256Preserved": ["bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1", "91afe9867567cb3a76d8a94af764aadf2f835b51ba57716a1241a225c5dffbf7", "a8c95ca5f9bed73d7b4647530153fd0e055040ca0b2dd2f30b5c85fe451ad0fb", "d6e0ba4c1eacd4484bc106c17f3d1d146338cf556585ec5a266edf5b20443ec2", "b3bb906fdc653705afccaf70710b8d002232010af1746242eb12199738c66239", "c748c35c2e1c70c61264ab65b24ddeb161282c6e1867b38a3d6a43b9e1f8a42d", "3687beb6c1ec1d22d7b94612727603ccc873f01bf4f86a74797a8e8f45628af0"]
+  },
+  "independentReview": {
+    "result": "PASS",
+    "reviewer": "B1Review",
+    "confidence": 0.95,
+    "UTSVersionCaveat": "Resolved by identical fresh-tree UTS temporary header hash and confirmation that version-timestamp.o is not linked into the wasm image.",
+    "futureWatch": "Re-check if version-timestamp.o linkage or global timestamp policy changes."
+  }
+}

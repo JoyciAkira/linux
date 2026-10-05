@@ -1,0 +1,73 @@
+{
+  "schema": "kwa-spawn-worker-abi-audit-v1",
+  "source": {
+    "repository": "JoyciAkira/linux",
+    "commit": "381e56bb4d9b694e05f456dd90e62af0b2bf6826",
+    "treeSha": "59ba33115726e217999c706839bd9c0670eb77ef",
+    "statusBeforeBuild": "clean"
+  },
+  "declaration": {
+    "file": "arch/wasm/include/asm/wasm_imports.h",
+    "line": 32,
+    "argumentCount": 7,
+    "argumentSemanticOrder": ["fn", "arg", "name", "name_len", "share_user_memory", "task_token", "spawn_flags"],
+    "verdict": "DEDICATED_SPAWN_FLAGS_ARGUMENT"
+  },
+  "calls": [
+    {
+      "file": "arch/wasm/kernel/setup.c",
+      "line": 74,
+      "argumentCount": 7,
+      "kind": "boot_worker",
+      "argumentSemanticOrder": ["fn", "arg", "name", "name_len", "share_user_memory", "task_token", "spawn_flags"],
+      "share_user_memory": false,
+      "task_token": 0,
+      "spawn_flags": 0,
+      "verdict": "PASS"
+    },
+    {
+      "file": "arch/wasm/kernel/smp.c",
+      "line": 61,
+      "argumentCount": 7,
+      "kind": "secondary_idle_worker",
+      "argumentSemanticOrder": ["fn", "arg", "name", "name_len", "share_user_memory", "task_token", "spawn_flags"],
+      "share_user_memory": 0,
+      "task_token": "kwa_task_token(idle)",
+      "spawn_flags": {"macro": "KWA_SPAWN_AUTOSTART", "value": 1},
+      "registryFlagsSeparateFromWireSpawnFlags": {"macro": "KWA_SF_AUTOSTART", "value": 2},
+      "verdict": "PASS"
+    },
+    {
+      "file": "arch/wasm/kernel/process.c",
+      "line": 254,
+      "argumentCount": 7,
+      "kind": "normal_or_fork_child",
+      "argumentSemanticOrder": ["fn", "arg", "name", "name_len", "share_user_memory", "task_token", "spawn_flags"],
+      "share_user_memory": "args->fn == wasm_call_clone_fn (true only for clone-with-fn sharing)",
+      "task_token": "kwa_task_token(p)",
+      "spawn_flags": 0,
+      "forkChildSpawnFlags": 0,
+      "schedulerRemainsAuthoritative": true,
+      "verdict": "PASS"
+    }
+  ],
+  "summary": {
+    "callSiteCount": 3,
+    "allCallSitesUseSevenArguments": true,
+    "sixArgumentCallSites": [],
+    "shareUserMemoryCarriesOnlyMemorySharingSemantics": true,
+    "autostartUsesDedicatedSpawnFlagsArgument": true
+  },
+  "commentDrift": [
+    {
+      "file": "arch/wasm/include/asm/wasm_imports.h",
+      "lines": "27-31",
+      "note": "Comment says bit 1 of share_user_memory carries KWA_SF_AUTOSTART, while the declaration and call sites use a dedicated seventh spawn_flags argument. Implementation call sites pass share_user_memory=0 for secondary idle and KWA_SPAWN_AUTOSTART as spawn_flags."
+    },
+    {
+      "file": "arch/wasm/kernel/smp.c",
+      "lines": "57-59",
+      "note": "Comment calls autostart bit 1 of share_user_memory; the actual call passes 0 for share_user_memory and KWA_SPAWN_AUTOSTART as the dedicated final argument."
+    }
+  ]
+}

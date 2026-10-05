@@ -1,0 +1,19 @@
+{
+  "cause": "KBUILD_BUILD_TIMESTAMP was absent for the original builds; usr/gen_init_cpio.c initializes default_mtime with time(NULL) unless gen_initramfs.sh passes -t. This changes only the newc CPIO mtime in .linux.initramfs. A global KBUILD_BUILD_TIMESTAMP fixes that section but changes Code/Data build metadata; scoping the timestamp to cmd_initfs yields exact frozen bytes.",
+  "classification": "GENERATED_INPUT_NONDETERMINISM",
+  "finalRuns": {
+    "A": {"initramfsCpioMtimeEpoch": 1791216968, "sha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1"},
+    "B": {"initramfsCpioMtimeEpoch": 1791216968, "sha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1"},
+    "C": {"initramfsCpioMtimeEpoch": 1791216968, "sha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1"}
+  },
+  "initialArtifacts": {
+    "Frozen": {"path": "/Volumes/External/DANI/kwa-b1-forensics/20261005T201717Z/frozen-from-git.wasm", "bytes": 3718924, "differentSectionsFromFrozen": [], "initramfsCpioMtimeEpoch": 1791216968, "initramfsCpioSha256": "372d2dca8eb190958317801b818b4e30f43c4da0c3167c8835997bd4d2ff22b4", "sha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1"},
+    "InitialBuildB": {"path": "/Volumes/External/DANI/kwa-b1-forensics/20261005T201717Z/diagnostic-A/tools/wasm/vmlinux.wasm", "bytes": 3718924, "differentSectionsFromFrozen": [".linux.initramfs"], "initramfsCpioMtimeEpoch": 1791230713, "initramfsCpioSha256": "aac3b7c9c247ad7b7c867e238577d1198b3039c1dd7248c310d262b6384fda93", "sha256": "91afe9867567cb3a76d8a94af764aadf2f835b51ba57716a1241a225c5dffbf7"},
+    "InitialBuildA_clean_defconfig": {"path": "/Volumes/External/DANI/kwa-b1-forensics/20261005T201717Z/build-A-clean-defconfig.wasm", "bytes": 3718924, "differentSectionsFromFrozen": [".linux.initramfs"], "initramfsCpioMtimeEpoch": 1791233423, "initramfsCpioSha256": "221ac0eb3715dcf8753d1193afc311089b52ee1c7bc6b230ce738de11f36a9c5", "sha256": "b3bb906fdc653705afccaf70710b8d002232010af1746242eb12199738c66239"},
+    "GlobalTimestampPinned": {"path": "/Volumes/External/DANI/kwa-b1-forensics/20261005T201717Z/B1R8-controlled-timestamp-v2/A/vmlinux.wasm", "bytes": 3718945, "differentSectionsFromFrozen": ["Code", "Data"], "initramfsCpioMtimeEpoch": 1791216968, "initramfsCpioSha256": "372d2dca8eb190958317801b818b4e30f43c4da0c3167c8835997bd4d2ff22b4", "sha256": "3687beb6c1ec1d22d7b94612727603ccc873f01bf4f86a74797a8e8f45628af0"}
+  },
+  "llvmWasmBackendNondeterminism": "NOT_SUPPORTED_BY_OBSERVED_DIVERGENCE",
+  "nonMetadataSectionsChangedForFinalArtifact": false,
+  "schema": "kwa-b1-first-divergence-v1",
+  "sourceLocations": {"usr/gen_init_cpio.c": "29,575-586", "usr/gen_initramfs.sh": "241-247"}
+}
