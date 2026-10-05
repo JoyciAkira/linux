@@ -1,0 +1,222 @@
+{
+  "schema": "k3-single-authority-regression-v1",
+  "verdict": "PASS",
+  "K3_STATUS": "PASS",
+  "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+  "sourceTreeStatusBeforeRun": "clean",
+  "timestamp": "2026-10-05T18:28:36.434926+00:00",
+  "kernelSha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1",
+  "KERNEL_AUTHORITY_INSTANCE_COUNT": 1,
+  "SECONDARY_VMLINUX_INSTANCE_COUNT": 0,
+  "SECONDARY_VMLINUX_DELIVERY_PATH": 0,
+  "MAIN_VMLINUX_INSTANCE_COUNT": 0,
+  "checks": {
+    "KERNEL_AUTHORITY_INSTANCE_COUNT": true,
+    "SECONDARY_VMLINUX_INSTANCE_COUNT": true,
+    "SECONDARY_VMLINUX_DELIVERY_PATH": true,
+    "PRODUCTION_MACHINE_RUN": true
+  },
+  "evidenceKind": "OBSERVED_CONSTRUCTION_AND_INIT_PAYLOADS_FROM_REAL_K5_MACHINE_RUN",
+  "sourceReceipt": {
+    "path": "k5-regression-receipt.json.gz",
+    "sha256": "ad847584eaa4563d4cc6a94ee517fbcee87147c1cc4f5c7951ffb06acae72fe1",
+    "encoding": "gzip",
+    "uncompressedSha256": "1cbd2ce90564092a3ad5e95ce0810127f7edbcca0556de44588ee0b1898104e1"
+  },
+  "workerInitializations": [
+    {
+      "kind": "workerInit",
+      "name": "kernel-authority",
+      "keys": [
+        "fn",
+        "arg",
+        "memory",
+        "parent_user_module",
+        "parent_user_memory",
+        "isKernelAuthority",
+        "kernelModule",
+        "bootViaExport",
+        "devicetree",
+        "initramfs",
+        "brokerSab",
+        "workerId",
+        "d1TraceEnabled",
+        "d1RunId"
+      ],
+      "workerId": 1,
+      "isKernelAuthority": true,
+      "hasUserMemory": false
+    },
+    {
+      "kind": "workerInit",
+      "name": "swapper/0 (0)",
+      "keys": [
+        "fn",
+        "arg",
+        "memory",
+        "parent_user_module",
+        "parent_user_memory",
+        "brokerSab",
+        "workerId",
+        "taskToken",
+        "mode",
+        "forkPid",
+        "d1TraceEnabled",
+        "d1RunId"
+      ],
+      "taskToken": 2233344,
+      "workerId": 2,
+      "isKernelAuthority": false,
+      "hasUserMemory": true
+    },
+    {
+      "kind": "workerInit",
+      "name": "kernel-authority",
+      "keys": [
+        "type"
+      ],
+      "isKernelAuthority": false,
+      "hasUserMemory": false
+    },
+    {
+      "kind": "workerInit",
+      "name": "kernel-authority",
+      "keys": [
+        "type"
+      ],
+      "isKernelAuthority": false,
+      "hasUserMemory": false
+    },
+    {
+      "kind": "workerInit",
+      "name": "kernel-authority",
+      "keys": [
+        "type"
+      ],
+      "isKernelAuthority": false,
+      "hasUserMemory": false
+    },
+    {
+      "kind": "workerInit",
+      "name": "init (1)",
+      "keys": [
+        "fn",
+        "arg",
+        "memory",
+        "parent_user_module",
+        "parent_user_memory",
+        "brokerSab",
+        "workerId",
+        "taskToken",
+        "mode",
+        "forkPid",
+        "d1TraceEnabled",
+        "d1RunId"
+      ],
+      "taskToken": 5984256,
+      "workerId": 3,
+      "isKernelAuthority": false,
+      "hasUserMemory": true
+    },
+    {
+      "kind": "workerInit",
+      "name": "kernel-authority",
+      "keys": [
+        "type"
+      ],
+      "isKernelAuthority": false,
+      "hasUserMemory": false
+    },
+    {
+      "kind": "workerInit",
+      "name": "init (1)",
+      "keys": [
+        "fn",
+        "arg",
+        "memory",
+        "parent_user_module",
+        "parent_user_memory",
+        "brokerSab",
+        "workerId",
+        "taskToken",
+        "mode",
+        "forkPid",
+        "d1TraceEnabled",
+        "d1RunId"
+      ],
+      "taskToken": 5984256,
+      "workerId": 4,
+      "isKernelAuthority": false,
+      "hasUserMemory": true
+    },
+    {
+      "kind": "workerInit",
+      "name": "kernel-authority",
+      "keys": [
+        "type"
+      ],
+      "isKernelAuthority": false,
+      "hasUserMemory": false
+    },
+    {
+      "kind": "workerInit",
+      "name": "kernel-authority",
+      "keys": [
+        "type"
+      ],
+      "isKernelAuthority": false,
+      "hasUserMemory": false
+    },
+    {
+      "kind": "workerInit",
+      "name": "kernel-authority",
+      "keys": [
+        "type"
+      ],
+      "isKernelAuthority": false,
+      "hasUserMemory": false
+    },
+    {
+      "kind": "workerInit",
+      "name": "kernel-authority",
+      "keys": [
+        "type"
+      ],
+      "isKernelAuthority": false,
+      "hasUserMemory": false
+    },
+    {
+      "kind": "workerInit",
+      "name": "kernel-authority",
+      "keys": [
+        "type"
+      ],
+      "isKernelAuthority": false,
+      "hasUserMemory": false
+    }
+  ],
+  "kernelConstructions": [
+    {
+      "kind": "wasmInstanceCreated",
+      "kernel": true,
+      "exports": [
+        "__indirect_function_table",
+        "get_args_length",
+        "get_args",
+        "fork_copied",
+        "trigger_irq_for_cpu",
+        "kwa_task_entry",
+        "boot",
+        "kwa_get_last_entry_nr",
+        "kwa_get_last_entry_a5",
+        "kwa_get_entry_count",
+        "kwa_get_last_pid",
+        "kwa_get_last_tgid",
+        "kwa_get_last_generation",
+        "syscall",
+        "kwa_syscall_for_task",
+        "get_thread_area"
+      ]
+    }
+  ]
+}

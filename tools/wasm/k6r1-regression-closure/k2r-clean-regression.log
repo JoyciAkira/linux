@@ -1,0 +1,24 @@
+[K2R-WITNESS] Loading vmlinux.wasm...
+[K2R-WITNESS] All K2 witness exports present.
+[K2R-WITNESS] Booting kernel...
+[K2R-WITNESS] Boot note: unreachable
+
+[K2R-WITNESS] TEST 1: Real kernel task binding...
+  PASS: real BrokerClient getpid and kernel-stamped identity {
+  result: 0,
+  errno: 0,
+  kernelPid: 0,
+  kernelTgid: 0,
+  kernelGeneration: 1
+}
+  PASS: real BrokerClient valid-baseline
+  PASS: real BrokerClient wrong-response-id
+  PASS: real BrokerClient stale-slot-generation
+  PASS: real BrokerClient foreign-worker
+  PASS: real BrokerClient replayed-kernel-generation
+  PASS: real BrokerClient previous-response-id
+
+[K2R-WITNESS] Generating K2R receipt...
+[K2R-WITNESS] Receipt written to /tmp/k6r1-regression-repair-5y8cqd_2/k2r-regression-receipt.json
+
+[K2R-WITNESS] ✅ ALL K2R CHECKS PASSED

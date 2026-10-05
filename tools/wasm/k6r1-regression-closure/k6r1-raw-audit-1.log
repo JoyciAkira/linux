@@ -1,0 +1,29 @@
+[SPW] fn=0 name=swapper/0 (0) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=2233344 mode=start
+[SPW] fn=1 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=5984256 mode=switch_entry
+[SPW] fn=2 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=5986560 mode=switch_entry
+[SPW] fn=2 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=5988864 mode=switch_entry
+[SPW] fn=2 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=5991168 mode=switch_entry
+[SPW] fn=2 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=5993472 mode=switch_entry
+[SPW] fn=2 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=5995776 mode=switch_entry
+[SPW] fn=2 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=5998080 mode=switch_entry
+[SPW] fn=2 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=6000384 mode=switch_entry
+[SPW] fn=2 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=6002688 mode=switch_entry
+[SPW] fn=2 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=6004992 mode=switch_entry
+[SPW] fn=2 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=6007296 mode=switch_entry
+{
+  "verdict": "PASS",
+  "RUN_ID": "a7577d15357f67255509bf673a1cc412",
+  "failed": [],
+  "brokerCounters": {
+    "UNATTRIBUTED_RESPONSE_COUNT": 0,
+    "TERMINAL_CANCEL_COUNT": 10,
+    "BOOT_COUNT": 0,
+    "SECONDARY_INST_COUNT": 0,
+    "POST_FREE_DISPATCH_COUNT": 0,
+    "WRONG_TASK_RESPONSE_COUNT": 0,
+    "STALE_TASK_REQUEST_COUNT": 0,
+    "BROKER_ERRORS": 0,
+    "ABA_REJECT_COUNT": 145
+  },
+  "errors": []
+}

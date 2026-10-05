@@ -1,0 +1,110 @@
+{
+  "schema": "k4-regression-run-v1",
+  "verdict": "PASS",
+  "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+  "sourceTreeStatusBeforeRun": "clean",
+  "kernelSha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1",
+  "execution": {
+    "command": [
+      "node",
+      "k4-real-brokered-syscall-witness.mjs",
+      "/tmp/kwa-work/kwa-linux-pristine/tools/wasm/vmlinux.wasm"
+    ],
+    "cwd": "/tmp/kwa-work/kwa-linux-pristine/tools/wasm",
+    "startedAt": "2026-10-05T18:29:12.051677+00:00",
+    "exitCode": 0
+  },
+  "log": {
+    "path": "k4-regression.log.gz",
+    "sha256": "1fefb23ef799662d7f3ee2e47d107ea1bb2372bbdf0bd7cbfa087f0f8672b393",
+    "encoding": "gzip",
+    "uncompressedSha256": "70ab86c2910a41ed93f3f78750e3fa2c3ebafc9213698f73d4e94380557312f7"
+  },
+  "witnessReceipt": {
+    "schema": "k4r-e2e-receipt-v5",
+    "K4_STATUS": "PASS",
+    "sourceRepository": "JoyciAkira/linux",
+    "sourceBranch": "fix/kwa-single-authority-v2",
+    "sourceCommit": "PENDING_CLEAN_COMMIT",
+    "sourceTreeStatusBeforeRun": "PENDING_CLEAN_CHECK",
+    "runtime": {
+      "node": "v26.5.0",
+      "platform": "darwin",
+      "arch": "arm64"
+    },
+    "artifacts": {
+      "vmlinuxSha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1",
+      "userModuleSha256": "d111eb72cd140d3c01a1c795c841676059b35dbdca7ebcac35963e46b3c16420",
+      "workerJsSha256": "1d024b18bf43ddc77cf0ee24d1da2d135aba6cafa976bc60d4c75898524d6b83",
+      "witnessSha256": "ed0a06d95107920f664d99e721a9b620cf82c42f0bbe372d0a1c3e0c76507908"
+    },
+    "REAL_SECONDARY_WORKER_CREATED": true,
+    "SECONDARY_INIT_MESSAGE_RECEIVED": true,
+    "USER_MODULE_INSTANTIATED": true,
+    "WORKER_LINUX_SYSCALL_OBSERVED": true,
+    "SYSCALL_NR": 172,
+    "BROKER_KICK_OBSERVED": true,
+    "PRODUCTION_SERVICE_BROKER_KICK_USED": true,
+    "REAL_KERNEL_ENTRY_OBSERVED": true,
+    "BROKER_RESP_ID_ENFORCEMENT": true,
+    "ABA_REJECT_COUNT": 0,
+    "GENERATION_CONTRACT_VALID": true,
+    "GENERATION_SEQUENCE": [
+      1,
+      2,
+      3
+    ],
+    "KERNEL_IDENTITY_STAMP_OBSERVED": true,
+    "CURRENT_TASK_BINDING_PROVEN": false,
+    "CURRENT_TASK_BINDING_NOTE": "init_task fallback; deferred to K5 integrated boot",
+    "A5_SENTINEL": "0xDEADBEEF",
+    "A5_SENTINEL_MATCH": true,
+    "RESULT_EXACT": true,
+    "ERRNO_MATCH": true,
+    "RESPONSE_CONSUMED_BY_SAME_WORKER": true,
+    "SEQUENTIAL_REQUEST_COUNT": 3,
+    "SEQUENTIAL_REQUEST_PASS_COUNT": 3,
+    "KERNEL_AUTHORITY_INSTANCE_COUNT": 1,
+    "SECONDARY_VMLINUX_DELIVERY_PATH": 0,
+    "SECONDARY_VMLINUX_INSTANCE_COUNT": 0,
+    "MANUAL_SAB_REQUEST_INJECTION_COUNT": 0,
+    "WITNESS_AUTHORITY_PUMP_CALL_COUNT": 0,
+    "BROKER_ERRORS": 0,
+    "WRONG_TASK_RESPONSE_COUNT": 0,
+    "STALE_TASK_REQUEST_COUNT": 0,
+    "USER_RESULTS_RECEIVED": true,
+    "USER_RESULTS_DATA": {
+      "type": "k4_user_results",
+      "results": [
+        0,
+        0,
+        0
+      ],
+      "callCount": 3
+    },
+    "diagStages": [
+      "INIT_RECEIVED",
+      "MEMORY_IDENTITY",
+      "BEFORE_USER_IMPORTS",
+      "AFTER_USER_IMPORTS",
+      "MODULE_IMPORTS",
+      "BEFORE_KERNEL_IMPORTS",
+      "AFTER_KERNEL_IMPORTS",
+      "AFTER_USER_INSTANTIATE",
+      "ENTRYPOINT_FOUND",
+      "BEFORE_ENTRYPOINT_CALL"
+    ],
+    "kernelWitness": {
+      "nr": 172,
+      "a5": 3735928559,
+      "pid": 0,
+      "gen": 3,
+      "entries": 3
+    },
+    "K1_REGRESSION_STATUS": "PASS",
+    "K2R_REGRESSION_STATUS": "PASS",
+    "K3_REGRESSION_STATUS": "PASS",
+    "verdict": "PASS"
+  },
+  "provenanceNote": "Outer run metadata is measured; legacy PENDING provenance and hardcoded other-gate labels inside stdout are not certification authority."
+}

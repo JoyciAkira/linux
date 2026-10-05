@@ -1,0 +1,12 @@
+{
+  "command": [
+    "bash",
+    "/Users/capyco/.claude/skills/ship-gate/scripts/ship-gate.sh",
+    "--fast",
+    "--dir",
+    "/tmp/kwa-work/kwa-linux/tools/wasm"
+  ],
+  "cwd": "/tmp/kwa-work/kwa-linux",
+  "startedAt": "2026-10-05T18:32:09.309808+00:00",
+  "exitCode": 0
+}

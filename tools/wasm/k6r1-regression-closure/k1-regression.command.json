@@ -1,0 +1,10 @@
+{
+  "command": [
+    "node",
+    "k1-six-arg-witness.mjs",
+    "/tmp/kwa-work/kwa-linux-pristine/tools/wasm/vmlinux.wasm"
+  ],
+  "cwd": "/tmp/kwa-work/kwa-linux-pristine/tools/wasm",
+  "startedAt": "2026-10-05T18:29:12.051547+00:00",
+  "exitCode": 0
+}

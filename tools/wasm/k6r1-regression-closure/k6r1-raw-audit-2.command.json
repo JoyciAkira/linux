@@ -1,0 +1,11 @@
+{
+  "command": [
+    "node",
+    "/tmp/k6r1-regression-repair-5y8cqd_2/audit-k6r1.mjs",
+    "/tmp/kwa-work/kwa-linux-pristine/tools/wasm",
+    "/tmp/k6r1-regression-repair-5y8cqd_2/k6r1-raw-audit-2.json"
+  ],
+  "cwd": "/tmp/kwa-work/kwa-linux-pristine/tools/wasm",
+  "startedAt": "2026-10-05T18:30:38.653308+00:00",
+  "exitCode": 1
+}

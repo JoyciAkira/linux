@@ -1,0 +1,12 @@
+{
+  "command": [
+    "/opt/homebrew/bin/tsc",
+    "-p",
+    "/tmp/kwa-work/kwa-linux/tools/wasm/tsconfig.json",
+    "--outDir",
+    "/tmp/k6r1-regression-repair-5y8cqd_2/rebuilt-dist"
+  ],
+  "cwd": "/tmp/kwa-work/kwa-linux",
+  "startedAt": "2026-10-05T18:24:02.325886+00:00",
+  "exitCode": 0
+}

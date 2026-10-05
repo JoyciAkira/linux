@@ -1,0 +1,30 @@
+[SPW] fn=0 name=swapper/0 (0) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=2233344 mode=start
+[SPW] fn=1 name=init (1) umodule=object:[object WebAssembly.Module] umem=object:[object WebAssembly.Memory] taskToken=5984256 mode=switch_entry
+{
+  "verdict": "NOT_PROVEN",
+  "RUN_ID": "9545b4136d0e212d5a79af713123569e",
+  "failed": [
+    "INVALID_SYSCALL",
+    "SIGSEGV_WAIT_STATUS",
+    "TASK_DEAD_FROM_KERNEL",
+    "RELEASE_AND_REAP",
+    "WAIT4_EXACT_CHILD",
+    "STORM_TEN_REAL_CHILDREN",
+    "AUTHORITY_SURVIVES",
+    "NO_RUNTIME_ERRORS"
+  ],
+  "brokerCounters": {
+    "UNATTRIBUTED_RESPONSE_COUNT": 0,
+    "TERMINAL_CANCEL_COUNT": 0,
+    "BOOT_COUNT": 0,
+    "SECONDARY_INST_COUNT": 0,
+    "POST_FREE_DISPATCH_COUNT": 0,
+    "WRONG_TASK_RESPONSE_COUNT": 0,
+    "STALE_TASK_REQUEST_COUNT": 0,
+    "BROKER_ERRORS": 0,
+    "ABA_REJECT_COUNT": 0
+  },
+  "errors": [
+    "RuntimeError: unreachable\n    at wasm://wasm/f3f22b06:wasm-function[1]:0x83\n    at self.onmessage (file:///private/tmp/kwa-work/kwa-linux-pristine/tools/wasm/dist/worker.js:1648:25)\n    at MessagePort.<anonymous> (file:///private/tmp/kwa-work/kwa-linux-pristine/tools/wasm/k5-node-worker-bootstrap.mjs:61:22)\n    at [nodejs.internal.kHybridDispatch] (node:internal/event_target:856:20)\n    at MessagePort.<anonymous> (node:internal/per_context/messageport:23:28)"
+  ]
+}

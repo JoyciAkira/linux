@@ -1,0 +1,53 @@
+{
+  "codeRabbit": {
+    "command": [
+      "coderabbit",
+      "review",
+      "--plain",
+      "--type",
+      "uncommitted",
+      "--dir",
+      "/tmp/kwa-work/kwa-linux/tools/wasm"
+    ],
+    "exitCode": 1,
+    "verdict": "PROVIDER_UNAVAILABLE",
+    "error": "Connection failed: Invalid organization; Review failed: Unknown error"
+  },
+  "jev": {
+    "verdict": "PROVIDER_UNAVAILABLE",
+    "errorCode": "MISSING_API_KEY"
+  },
+  "timestamp": "2026-10-05T18:28:14.005950+00:00",
+  "independentReview": {
+    "provider": "reviewer subagent K2HarnessReview",
+    "verdict": "PASS",
+    "confidence": 0.98,
+    "files": {
+      "k2-task-binding-witness.mjs": "a9d72dc9f9559620d8bdd6d212319bf54f4d53f04adaf22312c10e05cddcf646",
+      "k2-response-fault-injector.mjs": "e3417468ad05e11540b552d777a7ce2cc85b5007f995bc487908930176bdad7b"
+    },
+    "findings": [],
+    "correction": "Initial replay-generation finding withdrawn after checking actual index1 recovery response generation2 and index4 STALE_TASK_REQUEST_COUNT 0\u21921. Production replay guard is exercised."
+  },
+  "shipGateFull": {
+    "command": [
+      "env",
+      "STRIX_DIFF_BASE=0a7a5496db74e23c2d419fc0462fde0c33ab6932",
+      "bash",
+      "/Users/capyco/.claude/skills/ship-gate/scripts/ship-gate.sh",
+      "--full",
+      "--dir",
+      "/tmp/k6r1-regression-repair-5y8cqd_2/clean-worktree"
+    ],
+    "exitCode": 0,
+    "verdict": "PASS_WITH_WARNINGS",
+    "scope": "Committed K2R harness repair",
+    "automaticLintTestBuild": "NOT_CONFIGURED: specific tsc and K1/K2R/K4/K5 modules executed separately",
+    "Strix": {
+      "verdict": "PROVIDER_UNAVAILABLE",
+      "exitCode": 1,
+      "error": "MISSING REQUIRED ENVIRONMENT VARIABLES: STRIX_LLM is not set",
+      "wrapperVerdict": "WARN: scan produced no strix_runs output (rc=1)"
+    }
+  }
+}

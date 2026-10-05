@@ -1,0 +1,27 @@
+{
+  "timestamp": "2026-10-05T18:24:02.740576+00:00",
+  "compiler": "Version 6.0.3",
+  "command": [
+    "/opt/homebrew/bin/tsc",
+    "-p",
+    "tools/wasm/tsconfig.json",
+    "--outDir",
+    "/tmp/k6r1-regression-repair-5y8cqd_2/rebuilt-dist"
+  ],
+  "brokerSourceSha256": "fd0ec05e8f9998afa579dde4bf86a3f003ad3d4eca4d2952ff330a6d0219187a",
+  "files": [
+    {
+      "file": "kwa-broker.js",
+      "before": "080b29081605649f910c485426245be243129dbd66d398b2e9574edd80cd83dd",
+      "rebuilt": "080b29081605649f910c485426245be243129dbd66d398b2e9574edd80cd83dd",
+      "synced": false
+    },
+    {
+      "file": "kwa-broker.d.ts",
+      "before": "40128b68fa65d03887441f377b16164566980487c11534a17cc44b696a02a63f",
+      "rebuilt": "40128b68fa65d03887441f377b16164566980487c11534a17cc44b696a02a63f",
+      "synced": false
+    }
+  ],
+  "frozenKernelSha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1"
+}

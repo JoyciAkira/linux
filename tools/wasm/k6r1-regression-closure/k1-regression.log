@@ -1,0 +1,16 @@
+[K1-WITNESS] Loading vmlinux.wasm...
+[K1-WITNESS] All K1 witness exports present.
+[K1-WITNESS] Booting kernel...
+[K1-WITNESS] Boot note: unreachable
+[K1-WITNESS] Sending syscall nr=39 a5=0xdeadbeef via broker...
+[K1-WITNESS] Kernel witnessed: nr=39 a5=0x-21524111 entries=1
+[K1-WITNESS] Broker response: result=-22 errno=22 respId=1
+[K1-WITNESS] PASS: a5 round-trip exact through real kernel.
+[K1-WITNESS] PASS: nr preserved.
+[K1-WITNESS] PASS: opcode namespace isolated from syscall nr.
+[K1-WITNESS] PASS: kernel entry counter incremented.
+[K1-WITNESS] PASS: request/response identity matched.
+[K1-WITNESS] Testing non-SYSCALL opcode rejection...
+[K1-WITNESS] PASS: non-SYSCALL opcode rejected with ENOSYS, kernel not invoked.
+
+[K1-WITNESS] ✅ ALL CHECKS PASSED — K1 six-arg broker verified.

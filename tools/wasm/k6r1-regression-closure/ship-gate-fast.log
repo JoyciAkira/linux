@@ -1,0 +1,20 @@
+[1m════ ship-gate (fast) — wasm ════[0m
+[1m▶ secret + hygiene scan[0m
+[32m  ✓ secret + hygiene scan passed[0m
+[1m▶ detected: node (npm)[0m
+[33m  ⃠ lint: no command for this project — skipped[0m
+[33m  ⃠ test: no command for this project — skipped[0m
+[33m  ⃠ build: skipped in --fast mode[0m
+[33m  ⃠ strix security scan: skipped in --fast mode[0m
+[1m▶ self-hosted runner health[0m
+
+[1m════ summary ════[0m
+[32m  ✓ secret + hygiene scan[0m
+[33m  ⃠ lint (skipped)[0m
+[33m  ⃠ test (skipped)[0m
+[33m  ⃠ build (skipped)[0m
+[33m  ⃠ strix security scan (skipped)[0m
+[32m  ✓ runner health[0m
+
+[32mVERDICT: PASS — clear to ship.[0m
+  ℹ️  no .github/workflows — nothing to check

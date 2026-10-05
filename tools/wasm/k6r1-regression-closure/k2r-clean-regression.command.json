@@ -1,0 +1,11 @@
+{
+  "command": [
+    "node",
+    "k2-task-binding-witness.mjs",
+    "/tmp/k6r1-regression-repair-5y8cqd_2/clean-worktree/tools/wasm/vmlinux.wasm",
+    "/tmp/k6r1-regression-repair-5y8cqd_2/k2r-regression-receipt.json"
+  ],
+  "cwd": "/tmp/k6r1-regression-repair-5y8cqd_2/clean-worktree/tools/wasm",
+  "startedAt": "2026-10-05T18:32:37.246472+00:00",
+  "exitCode": 0
+}
