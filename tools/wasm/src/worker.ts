@@ -2061,16 +2061,33 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
  (startExport as (arg: number) => void)(0);
  }
  }
- } catch (entryError) {
- // K5: task-bound user workers report the real failure to the authority;
- // the kernel continuation rejects with it (never a fabricated result).
- if (taskToken) {
- try {
-          postMessage({ type: "user_task_error", taskToken, reason: String((entryError as Error)?.message ?? entryError).slice(0, 300), faultClass: "wasm_trap" });
- } catch { /* best-effort */ }
- }
- throw entryError;
- }
+    } catch (entryError) {
+      // K6R1: task-bound user workers report the real failure to the authority;
+      // the kernel continuation resolves with it (never a fabricated result).
+      // A genuine guest WebAssembly.RuntimeError is a classified wasm_trap:
+      // once delivered to the transport, do NOT rethrow — the authority will
+      // resume the SAME suspended JSPI kernel continuation via pendingCall.resolve(1).
+      // Rethrowing here races the delivery and surfaces as an uncaught worker
+      // error that kills the run even though the kernel already owns the death.
+      const isGuestTrap = entryError instanceof WebAssembly.RuntimeError;
+      let delivered = false;
+      if (taskToken) {
+        try {
+          postMessage({
+            type: "user_task_error",
+            taskToken,
+            reason: String((entryError as Error)?.message ?? entryError).slice(0, 300),
+            faultClass: isGuestTrap ? "wasm_trap" : "returned_without_exit",
+          });
+          delivered = true;
+        } catch { /* best-effort */ }
+      }
+      if (isGuestTrap && delivered) {
+        signalWorkerDone("guest_trap_delivered");
+        return;
+      }
+      throw entryError;
+    }
  if (taskToken) {
  // K5: a guest entrypoint that returns normally without exiting the task is
  // an abnormal end for that task's user image.
