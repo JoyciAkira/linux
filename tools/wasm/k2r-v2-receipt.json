@@ -1,0 +1,260 @@
+{
+  "K2R_STATUS": "PASS",
+  "sourceRepository": "JoyciAkira/linux",
+  "sourceBranch": "fix/kwa-single-authority-v2",
+  "sourceCommit": "e2301d96c41f050f032efe427c011dd105709f7d",
+  "sourceTreeStatus": "clean",
+  "sourceTreeStatusBeforeRun": "clean",
+  "timestamp": "2026-10-05T19:34:19.255Z",
+  "verdict": "PASS",
+  "kernelBuild": "Frozen K6R1 artifact; not rebuilt by this harness",
+  "environmentIdentity": "node-v26.5.0-darwin-arm64",
+  "artifact": {
+    "path": "tools/wasm/vmlinux.wasm",
+    "size": 3718924,
+    "sha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1"
+  },
+  "harnessArtifacts": {
+    "src/kwa-broker.ts": {
+      "sha256": "fd0ec05e8f9998afa579dde4bf86a3f003ad3d4eca4d2952ff330a6d0219187a"
+    },
+    "dist/kwa-broker.js": {
+      "sha256": "080b29081605649f910c485426245be243129dbd66d398b2e9574edd80cd83dd"
+    },
+    "k2-task-binding-witness.mjs": {
+      "sha256": "a9d72dc9f9559620d8bdd6d212319bf54f4d53f04adaf22312c10e05cddcf646"
+    },
+    "k2-response-fault-injector.mjs": {
+      "sha256": "e3417468ad05e11540b552d777a7ce2cc85b5007f995bc487908930176bdad7b"
+    }
+  },
+  "positiveResponse": {
+    "result": 0,
+    "errno": 0,
+    "kernelPid": 0,
+    "kernelTgid": 0,
+    "kernelGeneration": 1
+  },
+  "K1_REGRESSION_STATUS": "PENDING",
+  "REAL_TASK_BINDING": true,
+  "CALLER_PID_TID_AUTHORITATIVE": false,
+  "INIT_TASK_FALLBACK_LIMITATION": true,
+  "REQUEST_ID_MATCH": true,
+  "GENERATION_BINDING": true,
+  "SPOOF_PID_TID_INJECT_COUNT": 1,
+  "SPOOF_PID_TID_ACCEPT_COUNT": 0,
+  "WRONG_RESPONSE_ID_INJECT_COUNT": 1,
+  "WRONG_RESPONSE_ID_ACCEPT_COUNT": 0,
+  "STALE_GENERATION_INJECT_COUNT": 2,
+  "STALE_GENERATION_ACCEPT_COUNT": 0,
+  "FOREIGN_TASK_INJECT_COUNT": 1,
+  "FOREIGN_TASK_ACCEPT_COUNT": 0,
+  "ABA_INJECT_COUNT": 1,
+  "ABA_REJECT_COUNT": 3,
+  "ABA_ACCEPT_COUNT": 0,
+  "UNATTRIBUTED_RESPONSE_COUNT": 0,
+  "POST_FREE_DISPATCH_COUNT": 0,
+  "BROKER_ERRORS": 0,
+  "negativeControls": {
+    "classification": "ISOLATED_TRANSPORT_FAULT_INJECTION_NOT_LINUX_EVIDENCE",
+    "results": [
+      {
+        "name": "valid-baseline",
+        "response": {
+          "result": 1000,
+          "errno": 0,
+          "kernelPid": 1,
+          "kernelTgid": 1,
+          "kernelGeneration": 1
+        },
+        "injection": {
+          "name": "valid-baseline",
+          "index": 0,
+          "slot": 0,
+          "reqId": 1,
+          "generation": 1,
+          "corrupt": {
+            "RESP_ID": 1,
+            "WORKER_ID": 42,
+            "RESULT": 1000,
+            "ERRNO": 0,
+            "KERNEL_PID": 1,
+            "KERNEL_TGID": 1,
+            "KERNEL_GENERATION": 1,
+            "RESP_GENERATION": 1
+          },
+          "rejectionObserved": null
+        },
+        "counterBefore": null,
+        "counterAfter": null,
+        "passed": true
+      },
+      {
+        "name": "wrong-response-id",
+        "response": {
+          "result": 1001,
+          "errno": 0,
+          "kernelPid": 1,
+          "kernelTgid": 1,
+          "kernelGeneration": 2
+        },
+        "injection": {
+          "name": "wrong-response-id",
+          "index": 1,
+          "slot": 0,
+          "reqId": 2,
+          "generation": 2,
+          "corrupt": {
+            "RESP_ID": 102,
+            "WORKER_ID": 42,
+            "RESULT": -12345,
+            "ERRNO": 0,
+            "KERNEL_PID": 1,
+            "KERNEL_TGID": 1,
+            "KERNEL_GENERATION": 2,
+            "RESP_GENERATION": 2
+          },
+          "rejectionObserved": true
+        },
+        "counterBefore": 0,
+        "counterAfter": 1,
+        "passed": true
+      },
+      {
+        "name": "stale-slot-generation",
+        "response": {
+          "result": -1,
+          "errno": 38,
+          "kernelPid": 0,
+          "kernelTgid": 0,
+          "kernelGeneration": 0
+        },
+        "injection": {
+          "name": "stale-slot-generation",
+          "index": 2,
+          "slot": 0,
+          "reqId": 3,
+          "generation": 3,
+          "corrupt": {
+            "RESP_ID": 3,
+            "WORKER_ID": 42,
+            "RESULT": 1002,
+            "ERRNO": 0,
+            "KERNEL_PID": 1,
+            "KERNEL_TGID": 1,
+            "KERNEL_GENERATION": 3,
+            "RESP_GENERATION": 2
+          },
+          "rejectionObserved": null
+        },
+        "counterBefore": 1,
+        "counterAfter": 2,
+        "passed": true
+      },
+      {
+        "name": "foreign-worker",
+        "response": {
+          "result": -1,
+          "errno": 38,
+          "kernelPid": 0,
+          "kernelTgid": 0,
+          "kernelGeneration": 0
+        },
+        "injection": {
+          "name": "foreign-worker",
+          "index": 3,
+          "slot": 0,
+          "reqId": 4,
+          "generation": 4,
+          "corrupt": {
+            "RESP_ID": 4,
+            "WORKER_ID": 43,
+            "RESULT": 1003,
+            "ERRNO": 0,
+            "KERNEL_PID": 1,
+            "KERNEL_TGID": 1,
+            "KERNEL_GENERATION": 4,
+            "RESP_GENERATION": 4
+          },
+          "rejectionObserved": null
+        },
+        "counterBefore": 0,
+        "counterAfter": 1,
+        "passed": true
+      },
+      {
+        "name": "replayed-kernel-generation",
+        "response": {
+          "result": -1,
+          "errno": 38,
+          "kernelPid": 0,
+          "kernelTgid": 0,
+          "kernelGeneration": 0
+        },
+        "injection": {
+          "name": "replayed-kernel-generation",
+          "index": 4,
+          "slot": 0,
+          "reqId": 5,
+          "generation": 5,
+          "corrupt": {
+            "RESP_ID": 5,
+            "WORKER_ID": 42,
+            "RESULT": 1004,
+            "ERRNO": 0,
+            "KERNEL_PID": 1,
+            "KERNEL_TGID": 1,
+            "KERNEL_GENERATION": 2,
+            "RESP_GENERATION": 5
+          },
+          "rejectionObserved": null
+        },
+        "counterBefore": 0,
+        "counterAfter": 1,
+        "passed": true
+      },
+      {
+        "name": "previous-response-id",
+        "response": {
+          "result": 1005,
+          "errno": 0,
+          "kernelPid": 1,
+          "kernelTgid": 1,
+          "kernelGeneration": 6
+        },
+        "injection": {
+          "name": "previous-response-id",
+          "index": 5,
+          "slot": 0,
+          "reqId": 6,
+          "generation": 6,
+          "corrupt": {
+            "RESP_ID": 5,
+            "WORKER_ID": 42,
+            "RESULT": -12345,
+            "ERRNO": 0,
+            "KERNEL_PID": 1,
+            "KERNEL_TGID": 1,
+            "KERNEL_GENERATION": 6,
+            "RESP_GENERATION": 6
+          },
+          "rejectionObserved": true
+        },
+        "counterBefore": 2,
+        "counterAfter": 3,
+        "passed": true
+      }
+    ],
+    "counters": {
+      "UNATTRIBUTED_RESPONSE_COUNT": 0,
+      "TERMINAL_CANCEL_COUNT": 0,
+      "BOOT_COUNT": 0,
+      "SECONDARY_INST_COUNT": 0,
+      "POST_FREE_DISPATCH_COUNT": 0,
+      "WRONG_TASK_RESPONSE_COUNT": 1,
+      "STALE_TASK_REQUEST_COUNT": 1,
+      "BROKER_ERRORS": 0,
+      "ABA_REJECT_COUNT": 3
+    }
+  }
+}

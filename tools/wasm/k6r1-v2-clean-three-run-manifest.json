@@ -1,0 +1,34 @@
+{
+  "schema": "k6r1-v2-clean-three-run-manifest-v1",
+  "sourceCommit": "e2301d96c41f050f032efe427c011dd105709f7d",
+  "sourceBranch": "fix/kwa-single-authority-v2",
+  "runs": [
+    {
+      "run": 1,
+      "receiptPath": "/tmp/k6r1-v2-evidence/k6r1-v2-clean-run-1-receipt.json",
+      "sha256": "b08d9b450a9711d2c8031e216a17ec88136e3ac91dad1ad3a8b7dbdf821819b3",
+      "verdict": "PASS",
+      "sourceTreeStatusBeforeRun": "clean",
+      "RUN_ID": "5e69745fb6d6819538fc0fb02b681942"
+    },
+    {
+      "run": 2,
+      "receiptPath": "/tmp/k6r1-v2-evidence/k6r1-v2-clean-run-2-receipt.json",
+      "sha256": "dfb76d8e3c4c726daf490c66594bd832394ade16d7013f479927d850d7c1229d",
+      "verdict": "PASS",
+      "sourceTreeStatusBeforeRun": "clean",
+      "RUN_ID": "36a07e198063263e55de8ff51e88d891"
+    },
+    {
+      "run": 3,
+      "receiptPath": "/tmp/k6r1-v2-evidence/k6r1-v2-clean-run-3-receipt.json",
+      "sha256": "939500f36351beb8e1a7f6f0f283d86ca5e449d5c95bf95a7cbef86f944bddcc",
+      "verdict": "PASS",
+      "sourceTreeStatusBeforeRun": "clean",
+      "RUN_ID": "33d6bd1c8f95750587fc09aa59cae277"
+    }
+  ],
+  "allPassed": true,
+  "K6R1_RUN_COUNT": 3,
+  "K6R1_RUN_PASS_COUNT": 3
+}
