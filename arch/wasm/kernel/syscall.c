@@ -1,5 +1,6 @@
 #include <linux/entry-common.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <asm/globals.h>
@@ -301,6 +302,59 @@ SYSCALL_DEFINE1(set_thread_area, unsigned long, addr)
 	struct thread_info *ti = task_thread_info(current);
 	ti->tp_value = addr;
 	return 0;
+}
+
+/* Z1-GABI (KWA-v2.1): real guest startup ABI. Non-destructive read of the
+ * exec-captured argv/envp block. On success copies the wasm_process_args
+ * struct with buf-relative pointers and returns argc; the guest reads
+ * argc/argv/envp from its own memory. The kernel keeps ownership of the
+ * block (repeatable reads; child tasks inherit it on fork). */
+SYSCALL_DEFINE2(z1_get_args, void __user *, buf, size_t, len)
+{
+	struct wasm_process_args *args = current_thread_info()->args;
+	size_t total;
+	void *rel;
+
+	if (!args)
+		return -EINVAL;
+	total = sizeof(*args) + args->len;
+	if (len < total)
+		return -EINVAL;
+
+	rel = kmalloc(total, GFP_KERNEL);
+	if (!rel)
+		return -ENOMEM;
+	memcpy(rel, args, total);
+
+	/* Rewire argv/envp pointers to be relative to the guest buffer,
+	 * exactly like the get_args export contract. */
+	{
+		struct wasm_process_args *v = rel;
+		long off = (long)buf - (long)args;
+		int i;
+
+		for (i = 0; i < v->argc; i++)
+			v->argv[i] += off;
+		for (i = 0; i < v->envc; i++)
+			v->envp[i] += off;
+		v->argv += off / sizeof(void *);
+		v->envp += off / sizeof(void *);
+	}
+
+	if (copy_to_user(buf, rel, total)) {
+		kfree(rel);
+		return -EFAULT;
+	}
+	kfree(rel);
+	return args->argc;
+}
+
+/* Z1-GABI (KWA-v2.1): real TLS read. Returns the task's tp_value set via
+ * set_thread_area; U32_MAX means "never set" (thread_info init sentinel). */
+SYSCALL_DEFINE0(z1_get_thread_area)
+{
+	struct thread_info *ti = task_thread_info(current);
+	return ti->tp_value;
 }
 
 __attribute__((export_name("get_thread_area"))) unsigned long
