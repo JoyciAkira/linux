@@ -527,6 +527,9 @@ self.onmessage = (event) => {
              * Broker requests are validated against THIS binding; body TASK_ID/TID
              * from callers are non-authoritative and never dispatched. */
             const workerIdToTask = new Map();
+            /** Z1-GABI: kernel pid → taskToken, learned from C-stamped completions.
+             * Process events carry pids; task records are keyed by tokens. */
+            const pidToToken = new Map();
             let nextUserWorkerId = 2; // 1 is the authority worker itself
             let nextDispatchId = 1;
             // ---- broker dispatch state -----------------------------------------
@@ -697,6 +700,7 @@ self.onmessage = (event) => {
                         userWorkerId: 0,
                         pendingCall: null,
                         imageId: 0n,
+                        activeImageId: 0n,
                     };
                     tasks.set(token, t);
                 }
@@ -919,6 +923,9 @@ self.onmessage = (event) => {
                 Atomics.store(brokerI32, idx(pd.slot, S.KERNEL_PID), pid);
                 Atomics.store(brokerI32, idx(pd.slot, S.KERNEL_TGID), tgid);
                 Atomics.store(brokerU32, idx(pd.slot, S.KERNEL_GENERATION), generation);
+                // Z1-GABI: learn pid→token from C-stamped completion identity.
+                if (pid > 0)
+                    pidToToken.set(pid, taskToken);
                 // Observed evidence: emitted ONLY from the real C completion stamp.
                 postK5Diag("BROKER_SERVED", true, {
                     taskToken,
@@ -1171,6 +1178,25 @@ self.onmessage = (event) => {
                         postK5Diag("USER_TASK_ERROR_UNBOUND", false, { taskToken, reason, faultClass });
                         return;
                     }
+                    // Z1-GABI §5 (v1.1): STALE IMAGE — a worker spawned under an older
+                    // image must never resolve the CURRENT image's pending user.call.
+                    // This is exactly the exec window: imageId already rebound, the new
+                    // worker not yet spawned (or already running). Drop and count.
+                    if (t.activeImageId !== t.imageId) {
+                        postK5Diag("Z1_GABI_STALE_IMAGE_REJECT", false, {
+                            taskToken,
+                            activeImageId: t.activeImageId.toString(16),
+                            currentImageId: t.imageId.toString(16),
+                            reason: reason.slice(0, 120),
+                        });
+                        return;
+                    }
+                    // Z1-GABI §5 (v1.1): POST EXIT — a task that already died cannot
+                    // have its (already rejected) pending frame resolved by a worker.
+                    if (t.state === "dead") {
+                        postK5Diag("Z1_GABI_POST_EXIT_REJECT", false, { taskToken, reason: reason.slice(0, 120) });
+                        return;
+                    }
                     const pc = t.pendingCall;
                     t.pendingCall = null;
                     // K6R1 typed trap completion: resolve (NEVER reject — that would
@@ -1197,6 +1223,21 @@ self.onmessage = (event) => {
             };
             const userCall = () => {
                 const t = currentTask();
+                // Z1-GABI §5 (v1.1): authoritative user-image entry boundary.
+                // currentTask() resolves from executingTask — a live kernel-owned
+                // token. Any caller whose identity cannot be proven against the
+                // registry is rejected HERE, before the image is entered.
+                if (executingTask === 0 || t.token !== executingTask) {
+                    postK5Diag("Z1_GABI_WRONG_USER_IMAGE_TASK", false, {
+                        taskToken: t.token,
+                        executingTask,
+                    });
+                    throw new Error(`[Z1-GABI] user.call identity mismatch: token ${t.token} != executing ${executingTask}`);
+                }
+                if (t.state === "dead") {
+                    postK5Diag("Z1_GABI_POST_EXIT_REJECT", false, { taskToken: t.token });
+                    throw new Error(`[Z1-GABI] user.call after task death: ${t.name}`);
+                }
                 if (!t.userModule || !t.userMemory) {
                     throw new Error(`[K5] user.call before compile/instantiate for ${t.name}`);
                 }
@@ -1226,6 +1267,9 @@ self.onmessage = (event) => {
                 const promise = new Promise((resolve, reject) => {
                     t.pendingCall = { resolve: resolve, reject };
                 });
+                // Z1-GABI §5: this worker is spawned under the CURRENT image identity.
+                // Messages from any older worker (activeImageId != imageId) are stale.
+                t.activeImageId = t.imageId;
                 spawnUserWorker(t);
                 return promise;
             };
@@ -1296,6 +1340,7 @@ self.onmessage = (event) => {
                             // semantics) and never emit their own WASM_EXEC_COMMITTED — inherit the
                             // spawning task's identity. Boot/shell tasks keep 0n until their own exec.
                             imageId: tasks.get(executingTask)?.imageId ?? 0n,
+                            activeImageId: tasks.get(executingTask)?.imageId ?? 0n,
                         });
                         postK5Diag("TASK_REGISTERED", true, {
                             taskToken,
@@ -1339,11 +1384,19 @@ self.onmessage = (event) => {
                     get_user_memory: () => currentTask().userMemory,
                     process_event_handler(event_kind, _run_id_hi, _run_id_lo, _event_seq, pid, _tgid, _ppid, _worker_id, data0, _data1, _comm) {
                         // Z1-GABI: derive authoritative image identity from WASM_EXEC_COMMITTED (kind 2).
+                        // Events carry kernel pids; task records are keyed by tokens —
+                        // resolve through the pidToToken map learned at completions.
                         if (event_kind === 2 /* WASM_EXEC_COMMITTED */) {
-                            const t = tasks.get(pid);
+                            // Exec/exit syscalls NEVER reach syscall_complete, so
+                            // pidToToken has no entry for a freshly exec'd task. The event
+                            // is emitted synchronously on the exec bridge continuation —
+                            // executingTask IS the exec'd task there.
+                            const token = pidToToken.get(pid) ?? executingTask;
+                            pidToToken.set(pid, token);
+                            const t = tasks.get(token);
                             if (t) {
                                 t.imageId = data0;
-                                postK5Diag("Z1_GABI_IMAGE_BOUND", true, { taskToken: t.token, imageId: data0.toString(16) });
+                                postK5Diag("Z1_GABI_IMAGE_BOUND", true, { taskToken: t.token, pid, imageId: data0.toString(16) });
                             }
                         }
                         // NOTE: NO early return — the bridge falls through to the worker
@@ -1566,6 +1619,30 @@ self.onmessage = (event) => {
             importCount: moduleImports.length,
             imports: moduleImports.map(i => ({ module: i.module, name: i.name, kind: i.kind })),
         });
+        // Z1-GABI §4 (v1.1): STRICT IMPORT CONTRACT — INSTANTIATION-TIME FAIL CLOSED.
+        // Every (namespace, name) the guest requests must be part of the declared
+        // Linux guest ABI the host actually implements. Unknown namespaces or
+        // unsupported names reject BEFORE any execution — never degrade to stubs.
+        // This is the contract decision; the length-based route below is legacy
+        // routing only.
+        const Z1_GABI_LINUX_ABI = {
+            syscall: true,
+            get_thread_area: true,
+            get_args_length: true,
+            get_args: true,
+            arch_wasm_poll: true,
+        };
+        for (const imp of moduleImports) {
+            const ok = (imp.module === "env" && imp.name === "memory") ||
+                (imp.module === "linux" && Z1_GABI_LINUX_ABI[imp.name] === true);
+            if (!ok) {
+                postK4Diag("Z1_GABI_IMPORT_REJECTED", {
+                    module: imp.module,
+                    name: imp.name,
+                });
+                throw new Error(`[Z1-GABI] unsupported import ${imp.module}.${imp.name} — instantiation-time fail-closed`);
+            }
+        }
         currentStage = "BEFORE_KERNEL_IMPORTS";
         postK4Diag("BEFORE_KERNEL_IMPORTS");
         const imports = {
@@ -1615,14 +1692,15 @@ self.onmessage = (event) => {
         };
         currentStage = "AFTER_KERNEL_IMPORTS";
         postK4Diag("AFTER_KERNEL_IMPORTS");
-        // K4: Detect minimal user modules that import only env+linux (not kernel-shaped).
-        // These must be instantiated via doInstantiate() which constructs the correct
-        // broker-routed {env:{memory}, linux:{syscall,...}} import object.
-        // Kernel-shaped modules (blink, guest OS) use the full imports object below.
-        const isMinimalUserModule = moduleImports.length <= 2 &&
+        // Z1-GABI NOTE: this is a LEGACY ROUTING COMPATIBILITY HEURISTIC for the
+        // frozen KWA-v2 substrate. It is NOT a guest classification or authority
+        // decision and MUST NOT be used for any Z1-GABI acceptance criterion.
+        // KWA-v2.1 successor must replace this with explicit module/import
+        // contract validation (instantiation-time fail-closed).
+        const useLegacyMinimalImportRoute = moduleImports.length <= 2 &&
             moduleImports.every(i => i.module === "env" || i.module === "linux");
         let userInstance;
-        if (isMinimalUserModule) {
+        if (useLegacyMinimalImportRoute) {
             // Minimal user module path: bind parent module/memory into user_imports closure,
             // then call doInstantiate() which builds broker-only imports correctly.
             user.module = parent_user_module;
