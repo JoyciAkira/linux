@@ -1,0 +1,103 @@
+{
+ "schema": "k6r1-determinism-six-run-manifest-v1",
+ "timestamp": "2026-10-07T07:19:44.148637+00:00",
+ "sourceRepository": "JoyciAkira/linux",
+ "sourceBranch": "fix/kwa-single-authority-v2",
+ "sourceCommit": "43fa9db4db981e2af99677e81c34eb1520dda7df",
+ "kernel": {
+  "path": "tools/wasm/vmlinux.wasm",
+  "sha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1"
+ },
+ "purpose": "Close blocker K6R1_UNCAUGHT_TRAP_NONDETERMINISM (k6r1-final-manifest.json at 43fa9db4d): the secondary user worker no longer rethrows a delivered guest trap (worker.ts entryError handler: isGuestTrap && delivered -> signalWorkerDone('guest_trap_delivered') + return). This series proves the failure no longer reproduces.",
+ "runs": [
+  {
+   "run": 1,
+   "receiptPath": "k6r1-regression-closure/k6r1-determinism-run-1-receipt.json",
+   "sha256": "09a26993dc9f8b6100acbe18311629b793fff4161edc77988528e3c22111ead2",
+   "verdict": "PASS",
+   "sourceTreeStatusBeforeRun": "clean",
+   "RUN_ID": "6ab3734c6cd32e0ae13cd5ce60e36592",
+   "TRAP_CHILD_WAIT_STATUS": 11,
+   "TRAP_CHILD_TASK_DEAD_EVENT": true,
+   "STORM_ROUNDS_COMPLETED": 10,
+   "STORM_CHILDREN_WAITED": 10,
+   "checksAllTrue": true,
+   "errors": []
+  },
+  {
+   "run": 2,
+   "receiptPath": "k6r1-regression-closure/k6r1-determinism-run-2-receipt.json",
+   "sha256": "09d008a776ab9a991db44b3afc9e6fefe23a9ec4bec79252528fed6369ffe88b",
+   "verdict": "PASS",
+   "sourceTreeStatusBeforeRun": "clean",
+   "RUN_ID": "3df09127ea95eb3a615c4aed147854a4",
+   "TRAP_CHILD_WAIT_STATUS": 11,
+   "TRAP_CHILD_TASK_DEAD_EVENT": true,
+   "STORM_ROUNDS_COMPLETED": 10,
+   "STORM_CHILDREN_WAITED": 10,
+   "checksAllTrue": true,
+   "errors": []
+  },
+  {
+   "run": 3,
+   "receiptPath": "k6r1-regression-closure/k6r1-determinism-run-3-receipt.json",
+   "sha256": "24463bfcfc06c18b59b49a0a7ed7c42241e2e88738990e3ec1e43348d0b5c32b",
+   "verdict": "PASS",
+   "sourceTreeStatusBeforeRun": "clean",
+   "RUN_ID": "7fbae43b606dd856b6e22f0a6467c35d",
+   "TRAP_CHILD_WAIT_STATUS": 11,
+   "TRAP_CHILD_TASK_DEAD_EVENT": true,
+   "STORM_ROUNDS_COMPLETED": 10,
+   "STORM_CHILDREN_WAITED": 10,
+   "checksAllTrue": true,
+   "errors": []
+  },
+  {
+   "run": 4,
+   "receiptPath": "k6r1-regression-closure/k6r1-determinism-run-4-receipt.json",
+   "sha256": "dce8f1359c6af7c723b4d5d057de10f17edda3aa4b3825310b46c189e25255f3",
+   "verdict": "PASS",
+   "sourceTreeStatusBeforeRun": "clean",
+   "RUN_ID": "3c76c63eadf9ec2545403408c138a77d",
+   "TRAP_CHILD_WAIT_STATUS": 11,
+   "TRAP_CHILD_TASK_DEAD_EVENT": true,
+   "STORM_ROUNDS_COMPLETED": 10,
+   "STORM_CHILDREN_WAITED": 10,
+   "checksAllTrue": true,
+   "errors": []
+  },
+  {
+   "run": 5,
+   "receiptPath": "k6r1-regression-closure/k6r1-determinism-run-5-receipt.json",
+   "sha256": "3f232e604aa408f6d5525566a21313edf2a96da60fdc7733d3766152fcd87c17",
+   "verdict": "PASS",
+   "sourceTreeStatusBeforeRun": "clean",
+   "RUN_ID": "c98aeb3de52a905371fae61ed5cc7c4b",
+   "TRAP_CHILD_WAIT_STATUS": 11,
+   "TRAP_CHILD_TASK_DEAD_EVENT": true,
+   "STORM_ROUNDS_COMPLETED": 10,
+   "STORM_CHILDREN_WAITED": 10,
+   "checksAllTrue": true,
+   "errors": []
+  },
+  {
+   "run": 6,
+   "receiptPath": "k6r1-regression-closure/k6r1-determinism-run-6-receipt.json",
+   "sha256": "3780ff4d446c5e0432eea349de45e437b45cb73a9d634ddf2836871252256498",
+   "verdict": "PASS",
+   "sourceTreeStatusBeforeRun": "clean",
+   "RUN_ID": "9ecaaeac7388cfdc71e9a55d239949d7",
+   "TRAP_CHILD_WAIT_STATUS": 11,
+   "TRAP_CHILD_TASK_DEAD_EVENT": true,
+   "STORM_ROUNDS_COMPLETED": 10,
+   "STORM_CHILDREN_WAITED": 10,
+   "checksAllTrue": true,
+   "errors": []
+  }
+ ],
+ "allPassed": true,
+ "K6R1_RUN_COUNT": 6,
+ "K6R1_RUN_PASS_COUNT": 6,
+ "execution": "Six independent Node processes, sequential, against the frozen clean tree at the source commit; receipts written outside the tree so sourceTreeStatusBeforeRun stays clean. Every run: trap child died by real SIGSEGV (wait status 11), TASK_DEAD event for the child pid, 10/10 storm children reaped, authority alive, zero runtime errors.",
+ "supersedesBlocker": "k6r1-final-manifest.json:blockers[0] (K6R1_UNCAUGHT_TRAP_NONDETERMINISM)"
+}

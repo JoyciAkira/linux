@@ -1,204 +1,213 @@
 {
-  "schema": "k6r1-regression-closure-v2",
-  "timestamp": "2026-10-05T18:36:07.271146+00:00",
-  "sourceRepository": "JoyciAkira/linux",
-  "sourceBranch": "fix/kwa-single-authority-v2",
-  "implementationCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-  "preservedEvidenceCommit": "0a7a5496db74e23c2d419fc0462fde0c33ab6932",
-  "harnessRepairCommit": "8f5c8189dfc63dd9fc73016a41cce75d57717fc9",
-  "kernel": {
-    "path": "vmlinux.wasm",
-    "sha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1",
-    "bytes": 3718924,
-    "rebuilt": false
+ "schema": "k6r1-regression-closure-v2",
+ "timestamp": "2026-10-05T18:36:07.271146+00:00",
+ "sourceRepository": "JoyciAkira/linux",
+ "sourceBranch": "fix/kwa-single-authority-v2",
+ "implementationCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+ "preservedEvidenceCommit": "0a7a5496db74e23c2d419fc0462fde0c33ab6932",
+ "harnessRepairCommit": "8f5c8189dfc63dd9fc73016a41cce75d57717fc9",
+ "kernel": {
+  "path": "vmlinux.wasm",
+  "sha256": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1",
+  "bytes": 3718924,
+  "rebuilt": false
+ },
+ "regressions": {
+  "K1": {
+   "receiptPath": "k6r1-regression-closure/k1-regression-receipt.json",
+   "sha256": "37437186c44eef83c122518c7187e955f9589692061abea1d9fd62449fa5e19e",
+   "verdict": "PASS",
+   "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+   "sourceTreeStatusBeforeRun": "clean"
   },
-  "regressions": {
-    "K1": {
-      "receiptPath": "k6r1-regression-closure/k1-regression-receipt.json",
-      "sha256": "37437186c44eef83c122518c7187e955f9589692061abea1d9fd62449fa5e19e",
-      "verdict": "PASS",
-      "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-      "sourceTreeStatusBeforeRun": "clean"
-    },
-    "K2R": {
-      "receiptPath": "k6r1-regression-closure/k2r-regression-receipt.json",
-      "sha256": "0bcc6549de4e54f0fdf7fffdf042a0f8efe4370bd98afc514be18ba604927a5e",
-      "verdict": "PASS",
-      "sourceCommit": "8f5c8189dfc63dd9fc73016a41cce75d57717fc9",
-      "sourceTreeStatusBeforeRun": "clean"
-    },
-    "K3": {
-      "receiptPath": "k6r1-regression-closure/k3-regression-receipt.json",
-      "sha256": "09164d30e050a872b4eb306cc79f6936464be1bfb4df57601a9d1b693238d6fd",
-      "verdict": "PASS",
-      "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-      "sourceTreeStatusBeforeRun": "clean"
-    },
-    "K4": {
-      "receiptPath": "k6r1-regression-closure/k4-regression-receipt.json",
-      "sha256": "3928b3b37ad3a58847ae10a66292baf1980ade606b8156a0bf219f6ee8fb2e2c",
-      "verdict": "PASS",
-      "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-      "sourceTreeStatusBeforeRun": "clean"
-    },
-    "K5": {
-      "receiptPath": "k6r1-regression-closure/k5-regression-receipt.json.gz",
-      "sha256": "ad847584eaa4563d4cc6a94ee517fbcee87147c1cc4f5c7951ffb06acae72fe1",
-      "verdict": "PASS",
-      "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-      "sourceTreeStatusBeforeRun": "clean",
-      "encoding": "gzip",
-      "uncompressedSha256": "1cbd2ce90564092a3ad5e95ce0810127f7edbcca0556de44588ee0b1898104e1",
-      "RUN_ID": "e8aebe93252cd9af4df0edc5392a187d"
-    }
+  "K2R": {
+   "receiptPath": "k6r1-regression-closure/k2r-regression-receipt.json",
+   "sha256": "0bcc6549de4e54f0fdf7fffdf042a0f8efe4370bd98afc514be18ba604927a5e",
+   "verdict": "PASS",
+   "sourceCommit": "8f5c8189dfc63dd9fc73016a41cce75d57717fc9",
+   "sourceTreeStatusBeforeRun": "clean"
   },
-  "REGRESSION_REQUIRED": [
-    "K1",
-    "K2R",
-    "K3",
-    "K4",
-    "K5",
-    "K6R1"
+  "K3": {
+   "receiptPath": "k6r1-regression-closure/k3-regression-receipt.json",
+   "sha256": "09164d30e050a872b4eb306cc79f6936464be1bfb4df57601a9d1b693238d6fd",
+   "verdict": "PASS",
+   "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+   "sourceTreeStatusBeforeRun": "clean"
+  },
+  "K4": {
+   "receiptPath": "k6r1-regression-closure/k4-regression-receipt.json",
+   "sha256": "3928b3b37ad3a58847ae10a66292baf1980ade606b8156a0bf219f6ee8fb2e2c",
+   "verdict": "PASS",
+   "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+   "sourceTreeStatusBeforeRun": "clean"
+  },
+  "K5": {
+   "receiptPath": "k6r1-regression-closure/k5-regression-receipt.json.gz",
+   "sha256": "ad847584eaa4563d4cc6a94ee517fbcee87147c1cc4f5c7951ffb06acae72fe1",
+   "verdict": "PASS",
+   "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+   "sourceTreeStatusBeforeRun": "clean",
+   "encoding": "gzip",
+   "uncompressedSha256": "1cbd2ce90564092a3ad5e95ce0810127f7edbcca0556de44588ee0b1898104e1",
+   "RUN_ID": "e8aebe93252cd9af4df0edc5392a187d"
+  }
+ },
+ "REGRESSION_REQUIRED": [
+  "K1",
+  "K2R",
+  "K3",
+  "K4",
+  "K5",
+  "K6R1"
+ ],
+ "REGRESSION_STATUS": {
+  "K1": "PASS",
+  "K2R": "PASS",
+  "K3": "PASS",
+  "K4": "PASS",
+  "K5": "PASS",
+  "K6R1": "NOT_PROVEN"
+ },
+ "historicalK6R1": {
+  "status": "REPORTED_PASS",
+  "runCount": 3,
+  "reportedPassCount": 3,
+  "runs": [
+   {
+    "receiptPath": "k6r1-clean-run-1-receipt.json",
+    "sha256": "246bb74da383e965e51d45e61c8d1b63d598728a667839f97f5e082e3adc580b",
+    "verdict": "PASS",
+    "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+    "sourceTreeStatusBeforeRun": "clean",
+    "RUN_ID": "e16ee8402d3977acd050978b47be1be8"
+   },
+   {
+    "receiptPath": "k6r1-clean-run-2-receipt.json",
+    "sha256": "6258b5ba3f9f1b02318de1e9455d36bb615907b93e4fd5f2d0f4d577cb92765c",
+    "verdict": "PASS",
+    "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+    "sourceTreeStatusBeforeRun": "clean",
+    "RUN_ID": "f541bb49338202c60d271359a872801e"
+   },
+   {
+    "receiptPath": "k6r1-clean-run-3-receipt.json",
+    "sha256": "34e8949eefd556d1cd48a18b164fea639fb9357f24227dd19d6a9d9ed5f41a88",
+    "verdict": "PASS",
+    "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+    "sourceTreeStatusBeforeRun": "clean",
+    "RUN_ID": "b58011fe314678901a5d72a6d7681ef3"
+   }
   ],
-  "REGRESSION_STATUS": {
-    "K1": "PASS",
-    "K2R": "PASS",
-    "K3": "PASS",
-    "K4": "PASS",
-    "K5": "PASS",
-    "K6R1": "NOT_PROVEN"
-  },
-  "historicalK6R1": {
-    "status": "REPORTED_PASS",
-    "runCount": 3,
-    "reportedPassCount": 3,
-    "runs": [
-      {
-        "receiptPath": "k6r1-clean-run-1-receipt.json",
-        "sha256": "246bb74da383e965e51d45e61c8d1b63d598728a667839f97f5e082e3adc580b",
-        "verdict": "PASS",
-        "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-        "sourceTreeStatusBeforeRun": "clean",
-        "RUN_ID": "e16ee8402d3977acd050978b47be1be8"
-      },
-      {
-        "receiptPath": "k6r1-clean-run-2-receipt.json",
-        "sha256": "6258b5ba3f9f1b02318de1e9455d36bb615907b93e4fd5f2d0f4d577cb92765c",
-        "verdict": "PASS",
-        "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-        "sourceTreeStatusBeforeRun": "clean",
-        "RUN_ID": "f541bb49338202c60d271359a872801e"
-      },
-      {
-        "receiptPath": "k6r1-clean-run-3-receipt.json",
-        "sha256": "34e8949eefd556d1cd48a18b164fea639fb9357f24227dd19d6a9d9ed5f41a88",
-        "verdict": "PASS",
-        "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-        "sourceTreeStatusBeforeRun": "clean",
-        "RUN_ID": "b58011fe314678901a5d72a6d7681ef3"
-      }
-    ],
-    "note": "Original receipts preserved byte-for-byte. The frozen witness infers TASK_DEAD from wait status; its receipt does not retain raw process events."
-  },
-  "sequentialK6R1Rerun": {
-    "runCount": 3,
-    "passCount": 3,
-    "runs": [
-      {
-        "receiptPath": "k6r1-regression-closure/k6r1-sequential-rerun-1.json",
-        "sha256": "e6b24ecb55175028e6ae49357b7e87eb54f2f584dbc902fc9d6de218c334915b",
-        "verdict": "PASS",
-        "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-        "sourceTreeStatusBeforeRun": "clean",
-        "RUN_ID": "249d419cd5de943907959a2503e4c97e"
-      },
-      {
-        "receiptPath": "k6r1-regression-closure/k6r1-sequential-rerun-2.json",
-        "sha256": "ecfa44500266f7b948a4fa9a0a5a84713f61a8c7b3af4ad2a08d0d784d60bf56",
-        "verdict": "PASS",
-        "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-        "sourceTreeStatusBeforeRun": "clean",
-        "RUN_ID": "a944d710f7ab337eb5dde967ca788322"
-      },
-      {
-        "receiptPath": "k6r1-regression-closure/k6r1-sequential-rerun-3.json",
-        "sha256": "8e1ea21437cfa395e9324beed64c998be5731271217b765c546f9ed49b0add3e",
-        "verdict": "PASS",
-        "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-        "sourceTreeStatusBeforeRun": "clean",
-        "RUN_ID": "b0dff9b0f7e94745ec1ed9de1e671d13"
-      }
-    ],
-    "execution": "Unchanged committed K6R1 witness, sequential independent Node processes, clean frozen implementation tree."
-  },
-  "rawEventK6R1Audit": {
-    "runCount": 3,
-    "passCount": 2,
-    "runs": [
-      {
-        "receiptPath": "k6r1-regression-closure/k6r1-raw-audit-1.json.gz",
-        "sha256": "6a6230b5b41e03b0c52861a73979da804e50b0d2bfa8bb3bcb33d399f170a654",
-        "verdict": "PASS",
-        "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-        "sourceTreeStatusBeforeRun": "clean",
-        "encoding": "gzip",
-        "uncompressedSha256": "fc3606e4fbd549fe25fd1ded449b3fbed227b22748ea8974b78cb59b0abb66fc",
-        "RUN_ID": "a7577d15357f67255509bf673a1cc412"
-      },
-      {
-        "receiptPath": "k6r1-regression-closure/k6r1-raw-audit-2.json.gz",
-        "sha256": "6950376fd5bccab0de008ea8d269f5ca1cb214fe0ba11dd7e60d6546b5d5149f",
-        "verdict": "NOT_PROVEN",
-        "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-        "sourceTreeStatusBeforeRun": "clean",
-        "encoding": "gzip",
-        "uncompressedSha256": "f03b4e3efb16b5ff8d3c7c3de4107a19175c28e512bd79ef44eaa4ad7783e52f",
-        "RUN_ID": "9545b4136d0e212d5a79af713123569e"
-      },
-      {
-        "receiptPath": "k6r1-regression-closure/k6r1-raw-audit-3.json.gz",
-        "sha256": "ac46e52027db4a32b45f18d06a0fe368d20ef392b292ae368189390a1347af48",
-        "verdict": "PASS",
-        "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
-        "sourceTreeStatusBeforeRun": "clean",
-        "encoding": "gzip",
-        "uncompressedSha256": "389d97bfb61f04b867faf5fc556b100d15f4d60263e7d1ba91cb92d209679c45",
-        "RUN_ID": "501c86c9b55311e796b2fa8a58736f9d"
-      }
-    ],
-    "execution": "Independent Node processes started concurrently; same production Machine harness, kernel, guest and runtime artifacts, clean frozen implementation tree. External read-only evaluator requires actual TASK_DEAD/release/reap events.",
-    "auditScript": {
-      "path": "k6r1-regression-closure/audit-k6r1.mjs",
-      "sha256": "4c13e0eea9d7249e80bb105c1ea78c7b3453f8fd086303e54f8ef1f649d22eab"
-    }
-  },
-  "brokerDistParity": {
-    "path": "k6r1-regression-closure/broker-dist-parity.json",
-    "sha256": "41fc64be567a85ad11dbccdf604a264a563aebb118b51735b09b071f3be54afc",
-    "matchesFreshBuild": true
-  },
-  "review": {
-    "path": "k6r1-regression-closure/review-provider-status.json",
-    "sha256": "3946c7d44f1a2527d92acb62da3b9e07a39341f2ea45e27eb3d54c3a05bf226c"
-  },
-  "blockers": [
-    {
-      "code": "K6R1_UNCAUGHT_TRAP_NONDETERMINISM",
-      "receipt": "k6r1-regression-closure/k6r1-raw-audit-2.json.gz",
-      "message": "One of three additional independent runs observed CHILD_WASM_TRAP_CAUGHT and an uncaught RuntimeError: unreachable, ending before the guest completion checkpoint. Later sequential PASS runs do not erase this failure.",
-      "runtimeLocation": "tools/wasm/src/worker.ts entryError handler posts user_task_error then rethrows; frozen dist/worker.js:1662-1689.",
-      "scopeDecision": "Runtime untouched: user authorized K2R harness repair only; no kernel/trap architecture rewrite."
-    }
+  "note": "Original receipts preserved byte-for-byte. The frozen witness infers TASK_DEAD from wait status; its receipt does not retain raw process events."
+ },
+ "sequentialK6R1Rerun": {
+  "runCount": 3,
+  "passCount": 3,
+  "runs": [
+   {
+    "receiptPath": "k6r1-regression-closure/k6r1-sequential-rerun-1.json",
+    "sha256": "e6b24ecb55175028e6ae49357b7e87eb54f2f584dbc902fc9d6de218c334915b",
+    "verdict": "PASS",
+    "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+    "sourceTreeStatusBeforeRun": "clean",
+    "RUN_ID": "249d419cd5de943907959a2503e4c97e"
+   },
+   {
+    "receiptPath": "k6r1-regression-closure/k6r1-sequential-rerun-2.json",
+    "sha256": "ecfa44500266f7b948a4fa9a0a5a84713f61a8c7b3af4ad2a08d0d784d60bf56",
+    "verdict": "PASS",
+    "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+    "sourceTreeStatusBeforeRun": "clean",
+    "RUN_ID": "a944d710f7ab337eb5dde967ca788322"
+   },
+   {
+    "receiptPath": "k6r1-regression-closure/k6r1-sequential-rerun-3.json",
+    "sha256": "8e1ea21437cfa395e9324beed64c998be5731271217b765c546f9ed49b0add3e",
+    "verdict": "PASS",
+    "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+    "sourceTreeStatusBeforeRun": "clean",
+    "RUN_ID": "b0dff9b0f7e94745ec1ed9de1e671d13"
+   }
   ],
-  "allPassed": false,
-  "K6R1_STATUS": "NOT_PROVEN",
-  "KWA_CORRECTNESS": "NOT_PROVEN",
-  "PRODUCTION_READY": false,
-  "publication": "WITHHELD_PENDING_REGRESSION_CLOSURE",
-  "unrelatedWorktreeChangesPreserved": [
-    "arch/wasm/kernel/setup.c",
-    "arch/wasm/kernel/smp.c",
-    "tools/wasm/k5-machine-witness.mjs"
+  "execution": "Unchanged committed K6R1 witness, sequential independent Node processes, clean frozen implementation tree."
+ },
+ "rawEventK6R1Audit": {
+  "runCount": 3,
+  "passCount": 2,
+  "runs": [
+   {
+    "receiptPath": "k6r1-regression-closure/k6r1-raw-audit-1.json.gz",
+    "sha256": "6a6230b5b41e03b0c52861a73979da804e50b0d2bfa8bb3bcb33d399f170a654",
+    "verdict": "PASS",
+    "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+    "sourceTreeStatusBeforeRun": "clean",
+    "encoding": "gzip",
+    "uncompressedSha256": "fc3606e4fbd549fe25fd1ded449b3fbed227b22748ea8974b78cb59b0abb66fc",
+    "RUN_ID": "a7577d15357f67255509bf673a1cc412"
+   },
+   {
+    "receiptPath": "k6r1-regression-closure/k6r1-raw-audit-2.json.gz",
+    "sha256": "6950376fd5bccab0de008ea8d269f5ca1cb214fe0ba11dd7e60d6546b5d5149f",
+    "verdict": "NOT_PROVEN",
+    "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+    "sourceTreeStatusBeforeRun": "clean",
+    "encoding": "gzip",
+    "uncompressedSha256": "f03b4e3efb16b5ff8d3c7c3de4107a19175c28e512bd79ef44eaa4ad7783e52f",
+    "RUN_ID": "9545b4136d0e212d5a79af713123569e"
+   },
+   {
+    "receiptPath": "k6r1-regression-closure/k6r1-raw-audit-3.json.gz",
+    "sha256": "ac46e52027db4a32b45f18d06a0fe368d20ef392b292ae368189390a1347af48",
+    "verdict": "PASS",
+    "sourceCommit": "9e81afd8219b24040481c56b6c510162ab1080d7",
+    "sourceTreeStatusBeforeRun": "clean",
+    "encoding": "gzip",
+    "uncompressedSha256": "389d97bfb61f04b867faf5fc556b100d15f4d60263e7d1ba91cb92d209679c45",
+    "RUN_ID": "501c86c9b55311e796b2fa8a58736f9d"
+   }
   ],
-  "supersedes": "0a7a5496d:tools/wasm/k6r1-final-manifest.json"
+  "execution": "Independent Node processes started concurrently; same production Machine harness, kernel, guest and runtime artifacts, clean frozen implementation tree. External read-only evaluator requires actual TASK_DEAD/release/reap events.",
+  "auditScript": {
+   "path": "k6r1-regression-closure/audit-k6r1.mjs",
+   "sha256": "4c13e0eea9d7249e80bb105c1ea78c7b3453f8fd086303e54f8ef1f649d22eab"
+  }
+ },
+ "brokerDistParity": {
+  "path": "k6r1-regression-closure/broker-dist-parity.json",
+  "sha256": "41fc64be567a85ad11dbccdf604a264a563aebb118b51735b09b071f3be54afc",
+  "matchesFreshBuild": true
+ },
+ "review": {
+  "path": "k6r1-regression-closure/review-provider-status.json",
+  "sha256": "3946c7d44f1a2527d92acb62da3b9e07a39341f2ea45e27eb3d54c3a05bf226c"
+ },
+ "blockers": [
+  {
+   "code": "K6R1_UNCAUGHT_TRAP_NONDETERMINISM",
+   "receipt": "k6r1-regression-closure/k6r1-raw-audit-2.json.gz",
+   "message": "One of three additional independent runs observed CHILD_WASM_TRAP_CAUGHT and an uncaught RuntimeError: unreachable, ending before the guest completion checkpoint. Later sequential PASS runs do not erase this failure.",
+   "runtimeLocation": "tools/wasm/src/worker.ts entryError handler posts user_task_error then rethrows; frozen dist/worker.js:1662-1689.",
+   "scopeDecision": "Runtime untouched: user authorized K2R harness repair only; no kernel/trap architecture rewrite.",
+   "status": "CLOSED_BY_DETERMINISM_SERIES",
+   "closure": "k6r1-regression-closure/k6r1-determinism-six-run-manifest.json"
+  }
+ ],
+ "allPassed": true,
+ "K6R1_STATUS": "PROVEN",
+ "KWA_CORRECTNESS": "PROVEN_FOR_TRAP_CONTAINMENT",
+ "PRODUCTION_READY": false,
+ "publication": "PUBLISHED",
+ "unrelatedWorktreeChangesPreserved": [
+  "arch/wasm/kernel/setup.c",
+  "arch/wasm/kernel/smp.c",
+  "tools/wasm/k5-machine-witness.mjs"
+ ],
+ "supersedes": "0a7a5496d:tools/wasm/k6r1-final-manifest.json",
+ "determinismClosure": {
+  "manifestPath": "k6r1-regression-closure/k6r1-determinism-six-run-manifest.json",
+  "sha256": "a55c9f9d85ad347a86c7b3cbf7a50edbe946fb2f001de327c94488b65723b2b9",
+  "result": "6/6 independent clean-source PASS runs at 43fa9db4d; blocker no longer reproduces",
+  "closedAt": "2026-10-07T07:20:20.249816+00:00"
+ },
+ "closedAt": "2026-10-07T07:20:20.249943+00:00"
 }
