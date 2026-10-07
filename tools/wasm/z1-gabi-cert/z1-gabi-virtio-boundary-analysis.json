@@ -1,0 +1,34 @@
+{
+  "schema": "z1-gabi-virtio-boundary-analysis-v1",
+  "timestamp": "2026-10-08T00:00:00Z",
+  "purpose": "FIRST_DIVERGENT_BOUNDARY analysis for the Z1 browser boot stall (pid=1 ping-pong, hush not reached). Per contract: root cause stays NOT_PROVEN until the exact request->completion transition is identified.",
+  "environment": {
+    "kernelSha": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1",
+    "kernelLineage": "KWA-v2 frozen certified substrate (Z1-F product pin)",
+    "rootfs": "node-rootfs.ext2 (256MB, ext2 signature 0xEF53 verified, UUID 1ddbbe99-998e-4a2d-9c11-c234c6670109)",
+    "hostRuntime": "kwa-v2 host-runtime @ successor fix e2be59b16 (linux namespace for kernel-shaped guests)",
+    "browser": "chromium-1243 (executablePath launch, WebAssemblySuspending enabled)"
+  },
+  "fixedThisSession": [
+    "linux namespace missing in kernel-shaped imports (busybox multi-entry linux imports) -> instantiation-time 'Import #0 linux not an object' on rootfs /bin/sh exec — FIXED (broker-backed linux namespace)"
+  ],
+  "currentBoundary": {
+    "symptom": "boot log freezes after console_on_rootfs (hvc0); pid=1 <-> pid=12/13 sleep/wake ping-pong at ~10Hz; 0 storage reads; 0 [Z1VIRTIO] main cmd-received lines; no ext2/mount log lines",
+    "markerTable": {
+      "GUEST_SUBMIT": "UNCONFIRMED (no host-side kick received)",
+      "HOST_KICK_RECEIVED": "FAIL (0 [Z1VIRTIO] main: cmd received across runs)",
+      "HOST_READ": "NOT_REACHED (0 storage reads)",
+      "USED_RING": "NOT_REACHED",
+      "IRQ_DELIVERY": "NOT_REACHED",
+      "GUEST_COMPLETION": "NOT_REACHED"
+    },
+    "firstDivergentBoundary": "authority virtio.notify (Suspending import) -> main virtio_cmd relay: the first block READ request never surfaces on the main side",
+    "rootCause": "NOT_PROVEN",
+    "nondeterminism": "runs vary: some runs enumerate vda (268MB visible, virtio round-trips for geometry/config DID work), later stages still never complete"
+  },
+  "nodeProbeFinding": {
+    "note": "Node probe (k5 harness) hits an EARLIER, Node-specific boundary: SuspendError 'trying to suspend JS frames' at virtio_wasm_probe -> run_on_main -> _setup — a JSPI Suspending import invoked on a plain JS stack. Chromium accepts the same sequence (vda enumerated in browser runs). Node worker V8 stack semantics differ; the Node probe is NOT a faithful control for the virtio boundary.",
+    "implication": "browser-side instrumentation (authority-side virtio.notify logging in worker.ts kernel_imports virtio section) is the correct next diagnostic step"
+  },
+  "nextStep": "Instrument authority-side virtio.notify/virtio.setup in worker.ts kernel_imports virtio section (log call/resolve/postMessage), rerun browser driver, capture which notify transitions fire; then fix the owning layer (authority wiring vs main relay vs device service)."
+}
