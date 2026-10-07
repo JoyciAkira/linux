@@ -454,7 +454,7 @@ self.onmessage = (event) => {
         }
         if (data.type === "virtio_result") {
             if (authorityHandlers)
-                authorityHandlers.virtioResult(data.seq, data.ok, data.value);
+                authorityHandlers.virtioResult(data.seq, data.ok, data.value, data.irq);
             else
                 postK5Diag("VIRTIO_RESULT_UNATTRIBUTED", false, { seq: data.seq, authorityReady: false });
             return;

@@ -184,7 +184,7 @@ let authorityHandlers: {
   kick: () => void;
   forkCopied: (pid: number) => void;
   irq: (cpu: number, irq: number) => void;
-  virtioResult: (seq: number, ok: boolean, value: number) => void;
+  virtioResult: (seq: number, ok: boolean, value: number, irq?: number) => void;
   userTaskError: (taskToken: number, reason: string, faultClass: "wasm_trap" | "returned_without_exit") => void;
 } | null = null;
 
@@ -686,7 +686,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
       return;
     }
     if (data.type === "virtio_result") {
-      if (authorityHandlers) authorityHandlers.virtioResult(data.seq, data.ok, data.value);
+      if (authorityHandlers) authorityHandlers.virtioResult(data.seq, data.ok, data.value, data.irq);
       else postK5Diag("VIRTIO_RESULT_UNATTRIBUTED", false, { seq: data.seq, authorityReady: false });
       return;
     }
