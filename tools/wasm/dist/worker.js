@@ -1645,8 +1645,32 @@ self.onmessage = (event) => {
         }
         currentStage = "BEFORE_KERNEL_IMPORTS";
         postK4Diag("BEFORE_KERNEL_IMPORTS");
+        // Z1-GABI: guests may declare MULTIPLE linux.* entries (busybox: syscall +
+        // get_args_length + get_args + arch_wasm_poll). The legacy import-count
+        // route misclassifies them as kernel-shaped, so the full imports object
+        // MUST carry a real `linux` namespace — broker-backed, task-bound via
+        // the workerId registry (K4 model). Without it, instantiation throws
+        // "Import #0 linux: module is not an object".
+        const z1LinuxImports = (() => {
+            if (typeof brokerSab === "undefined" || typeof workerId === "undefined") {
+                throw new Error("[Z1-GABI] secondary worker missing brokerSab/workerId for linux imports");
+            }
+            const z1BrokerClient = new BrokerClient(brokerSab, workerId);
+            const z1BrokerSyscall = (nr, a0, a1, a2, a3, a4, a5) => z1BrokerClient.invoke(nr, a0, a1, a2, a3, a4, a5, taskToken ?? 0, 0, () => {
+                postMessage({ type: "broker_kick", workerId });
+            }).result;
+            return {
+                syscall: z1BrokerSyscall,
+                // Z1-GABI NOTE: frozen-kernel ABI placeholders (see user_imports).
+                get_thread_area: () => 0,
+                get_args_length: () => 0,
+                get_args: () => 0,
+                arch_wasm_poll: () => 0,
+            };
+        })();
         const imports = {
             env: { memory },
+            linux: z1LinuxImports,
             boot: {
                 get_devicetree: unavailable,
                 get_initramfs: unavailable,

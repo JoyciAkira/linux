@@ -70,6 +70,18 @@ export interface Imports {
         fork_user(pid: number): void;
         write_zeroes(to: number, n: number): number;
     };
+    /** Z1-GABI: guests may import linux.* functions DIRECTLY (busybox declares
+     * syscall + get_args_length + get_args + arch_wasm_poll). Kernel-shaped
+     * guests (multi-entry linux imports) need this namespace in the full
+     * imports object — broker-backed, task-bound. Absent for guests that do
+     * not request it. */
+    linux?: {
+        syscall(nr: number, arg0: number, arg1: number, arg2: number, arg3: number, arg4: number, arg5: number): number;
+        get_thread_area(): number;
+        get_args_length(): number;
+        get_args(buf: number): number;
+        arch_wasm_poll(): number;
+    };
     /** K5: with authority wiring every virtio import is a JSPI Suspending
      * round-trip to the main process where the devices live; plain function
      * values are the pre-K5 direct-call form. */
