@@ -41,6 +41,9 @@ export declare const OFF: {
     readonly BROKER_ERRORS: 13;
     readonly DOORBELL: 14;
     readonly ABA_REJECT_COUNT: 15;
+    readonly WRONG_TASK_SYSCALL_COUNT: 3;
+    readonly STALE_IMAGE_SYSCALL_COUNT: 4;
+    readonly POST_EXIT_SYSCALL_COUNT: 5;
 };
 export declare const S: {
     readonly STATE: 0;

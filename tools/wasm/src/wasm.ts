@@ -430,7 +430,9 @@ export function kernel_imports(
           data1,
           comm_str,
         );
-        return;
+        // Z1-GABI: fall THROUGH to the forward path below — the handler only
+        // observes (imageId binding); main-thread event consumers (witness
+        // rawEvents) must keep receiving every event.
       }
 
       // Kernel process events may originate on any wasm worker. The main

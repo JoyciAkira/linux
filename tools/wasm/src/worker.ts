@@ -328,6 +328,11 @@ function user_imports({
         env: { memory },
         linux: {
           syscall: wrappedSyscallHandler,
+          // Z1-GABI NOTE: these three are part of the FROZEN kernel ABI
+          // (bbe4f538 calls them synchronously during guest task setup).
+          // `() => 0` is load-bearing (empty argv / no TLS) until the
+          // kernel-side argv/TLS service lands; making them throw breaks
+          // every guest boot. Real values are a kernel-rebuild step.
           get_thread_area: () => 0,
           get_args_length: () => 0,
           get_args: () => 0,
@@ -793,6 +798,8 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           resolve: (outcome?: number) => void;
           reject: (reason: unknown) => void;
         } | null;
+        /** Z1-GABI: authoritative image identity derived from WASM_EXEC_COMMITTED. */
+        imageId: bigint;
       }
       const tasks = new Map<number, TaskRecord>();
       /** taskToken → active yield suspension (kernel parked on this stack). */
@@ -1006,7 +1013,8 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
             inheritFrom: 0,
             userWorker: null,
             userWorkerId: 0,
-            pendingCall: null,
+ pendingCall: null,
+ imageId: 0n,
           };
           tasks.set(token, t);
         }
@@ -1308,6 +1316,12 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
                 rejectStaleRequest(s);
                 continue;
               }
+ // Z1-GABI NOTE: image-identity and task-boundary enforcement does NOT
+ // live here. executingTask is a transient JSPI-context variable, not
+ // request ownership — K4's proven model is workerIdToTask registry
+ // binding (checked above). Broker SLOTS_OFF was widened (64->80) for
+ // Z1-GABI telemetry counters; enforcement happens at the user-image
+ // layer (user.call entry) where currentTask() is authoritative.
               if (
                 Atomics.compareExchange(brokerI32, si, STATE.REQUESTED, STATE.CLAIMED) !==
                 STATE.REQUESTED
@@ -1644,7 +1658,11 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
               inheritFrom: executingTask,
               userWorker: null,
               userWorkerId: 0,
-              pendingCall: null,
+ pendingCall: null,
+ // Z1-GABI: clone children share the parent image (CLONE_VM / clone-with-fn
+ // semantics) and never emit their own WASM_EXEC_COMMITTED — inherit the
+ // spawning task's identity. Boot/shell tasks keep 0n until their own exec.
+ imageId: tasks.get(executingTask)?.imageId ?? 0n,
             });
             postK5Diag("TASK_REGISTERED", true, {
               taskToken,
@@ -1686,6 +1704,19 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           },
           get_user_module: () => currentTask().userModule,
           get_user_memory: () => currentTask().userMemory,
+          process_event_handler(event_kind, _run_id_hi, _run_id_lo, _event_seq, pid, _tgid, _ppid, _worker_id, data0, _data1, _comm) {
+            // Z1-GABI: derive authoritative image identity from WASM_EXEC_COMMITTED (kind 2).
+            if (event_kind === 2 /* WASM_EXEC_COMMITTED */) {
+              const t = tasks.get(pid);
+              if (t) {
+                t.imageId = data0;
+                postK5Diag("Z1_GABI_IMAGE_BOUND", true, { taskToken: t.token, imageId: data0.toString(16) });
+              }
+            }
+            // NOTE: NO early return — the bridge falls through to the worker
+            // forward path so main-thread event observers (witness rawEvents,
+            // TASK_DEAD checks, monotonicity) keep receiving every event.
+          },
         }),
         user: {
           compile(buf: number, size: number): number {

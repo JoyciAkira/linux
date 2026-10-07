@@ -41,6 +41,13 @@ export const OFF = {
     BROKER_ERRORS: 13,
     DOORBELL: 14,
     ABA_REJECT_COUNT: 15,
+    // Z1-GABI trust-boundary telemetry — HOST-ONLY counters in unused control
+    // words (3-7 are free between TERMINAL_CANCEL_COUNT and BOOT_COUNT). They
+    // MUST stay < BOOT_COUNT so the frozen kernel↔host layout (SLOTS_OFF=64,
+    // KWA-v2 §2–3) is untouched; the kernel never reads or writes these words.
+    WRONG_TASK_SYSCALL_COUNT: 3,
+    STALE_IMAGE_SYSCALL_COUNT: 4,
+    POST_EXIT_SYSCALL_COUNT: 5,
 };
 export const S = {
     STATE: 0,

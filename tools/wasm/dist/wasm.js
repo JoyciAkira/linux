@@ -107,7 +107,9 @@ export function kernel_imports({ is_worker, memory, spawn_worker, boot_console_w
             const comm_str = new TextDecoder().decode(mem.slice(comm, comm + comm_len));
             if (process_event_handler) {
                 process_event_handler(event_kind, run_id_hi, run_id_lo, event_seq, pid, tgid, ppid, worker_id, data0, data1, comm_str);
-                return;
+                // Z1-GABI: fall THROUGH to the forward path below — the handler only
+                // observes (imageId binding); main-thread event consumers (witness
+                // rawEvents) must keep receiving every event.
             }
             // Kernel process events may originate on any wasm worker. The main
             // Machine owns the authoritative event stream, so worker-side imports
