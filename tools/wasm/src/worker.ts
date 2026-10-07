@@ -2024,15 +2024,16 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
  currentStage = "AFTER_KERNEL_IMPORTS";
  postK4Diag("AFTER_KERNEL_IMPORTS");
 
-  // K4: Detect minimal user modules that import only env+linux (not kernel-shaped).
-  // These must be instantiated via doInstantiate() which constructs the correct
-  // broker-routed {env:{memory}, linux:{syscall,...}} import object.
-  // Kernel-shaped modules (blink, guest OS) use the full imports object below.
-  const isMinimalUserModule = moduleImports.length <= 2 &&
-    moduleImports.every(i => i.module === "env" || i.module === "linux");
+ // Z1-GABI NOTE: this is a LEGACY ROUTING COMPATIBILITY HEURISTIC for the
+ // frozen KWA-v2 substrate. It is NOT a guest classification or authority
+ // decision and MUST NOT be used for any Z1-GABI acceptance criterion.
+ // KWA-v2.1 successor must replace this with explicit module/import
+ // contract validation (instantiation-time fail-closed).
+ const useLegacyMinimalImportRoute = moduleImports.length <= 2 &&
+ moduleImports.every(i => i.module === "env" || i.module === "linux");
 
   let userInstance: WebAssembly.Instance;
-  if (isMinimalUserModule) {
+ if (useLegacyMinimalImportRoute) {
     // Minimal user module path: bind parent module/memory into user_imports closure,
     // then call doInstantiate() which builds broker-only imports correctly.
     user.module = parent_user_module;
