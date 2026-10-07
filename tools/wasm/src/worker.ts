@@ -826,6 +826,9 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
        * Broker requests are validated against THIS binding; body TASK_ID/TID
        * from callers are non-authoritative and never dispatched. */
       const workerIdToTask = new Map<number, number>();
+      /** Z1-GABI: kernel pid → taskToken, learned from C-stamped completions.
+       * Process events carry pids; task records are keyed by tokens. */
+      const pidToToken = new Map<number, number>();
       let nextUserWorkerId = 2; // 1 is the authority worker itself
       let nextDispatchId = 1;
 
@@ -1254,6 +1257,8 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
         Atomics.store(brokerI32, idx(pd.slot, S.KERNEL_PID), pid);
         Atomics.store(brokerI32, idx(pd.slot, S.KERNEL_TGID), tgid);
         Atomics.store(brokerU32, idx(pd.slot, S.KERNEL_GENERATION), generation);
+        // Z1-GABI: learn pid→token from C-stamped completion identity.
+        if (pid > 0) pidToToken.set(pid, taskToken);
         // Observed evidence: emitted ONLY from the real C completion stamp.
         postK5Diag("BROKER_SERVED", true, {
           taskToken,
@@ -1754,11 +1759,19 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           get_user_memory: () => currentTask().userMemory,
           process_event_handler(event_kind, _run_id_hi, _run_id_lo, _event_seq, pid, _tgid, _ppid, _worker_id, data0, _data1, _comm) {
             // Z1-GABI: derive authoritative image identity from WASM_EXEC_COMMITTED (kind 2).
+            // Events carry kernel pids; task records are keyed by tokens —
+            // resolve through the pidToToken map learned at completions.
             if (event_kind === 2 /* WASM_EXEC_COMMITTED */) {
-              const t = tasks.get(pid);
+              // Exec/exit syscalls NEVER reach syscall_complete, so
+              // pidToToken has no entry for a freshly exec'd task. The event
+              // is emitted synchronously on the exec bridge continuation —
+              // executingTask IS the exec'd task there.
+              const token = pidToToken.get(pid) ?? executingTask;
+              pidToToken.set(pid, token);
+              const t = tasks.get(token);
               if (t) {
                 t.imageId = data0;
-                postK5Diag("Z1_GABI_IMAGE_BOUND", true, { taskToken: t.token, imageId: data0.toString(16) });
+                postK5Diag("Z1_GABI_IMAGE_BOUND", true, { taskToken: t.token, pid, imageId: data0.toString(16) });
               }
             }
             // NOTE: NO early return — the bridge falls through to the worker

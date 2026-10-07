@@ -1,4 +1,5 @@
 #include <linux/entry-common.h>
+#include <linux/binfmts.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
@@ -304,48 +305,69 @@ SYSCALL_DEFINE1(set_thread_area, unsigned long, addr)
 	return 0;
 }
 
-/* Z1-GABI (KWA-v2.1): real guest startup ABI. Non-destructive read of the
- * exec-captured argv/envp block. On success copies the wasm_process_args
- * struct with buf-relative pointers and returns argc; the guest reads
- * argc/argv/envp from its own memory. The kernel keeps ownership of the
- * block (repeatable reads; child tasks inherit it on fork). */
+/* Z1-GABI (KWA-v2.1): real guest startup ABI. Compact, non-destructive read
+ * of the exec-captured argv/envp block. Layout written to @buf:
+ *   [0] argc   [4] envc
+ *   [8..]      argv[] guest pointers (argc entries)
+ *   [..]       envp[] guest pointers (envc entries)
+ *   [..]       NUL-terminated argument/env strings
+ * Returns argc on success; -EINVAL if the task has no args block;
+ * -ENOBUFS if @len is smaller than the compact size (nothing written).
+ * The kernel keeps ownership of the block (repeatable reads; fork
+ * children inherit it). */
 SYSCALL_DEFINE2(z1_get_args, void __user *, buf, size_t, len)
 {
 	struct wasm_process_args *args = current_thread_info()->args;
-	size_t total;
-	void *rel;
+	size_t ptrs, strings, total, off;
+	unsigned long *out;
+	int i;
 
 	if (!args)
 		return -EINVAL;
-	total = sizeof(*args) + args->len;
+
+	strings = 0;
+	for (i = 0; i < args->argc; i++)
+		strings += strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+	for (i = 0; i < args->envc; i++)
+		strings += strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+	ptrs = (size_t)(args->argc + args->envc) * sizeof(unsigned long);
+	total = 8 + ptrs + strings;
 	if (len < total)
-		return -EINVAL;
+		return -ENOBUFS;
 
-	rel = kmalloc(total, GFP_KERNEL);
-	if (!rel)
+	out = kmalloc(total, GFP_KERNEL);
+	if (!out)
 		return -ENOMEM;
-	memcpy(rel, args, total);
-
-	/* Rewire argv/envp pointers to be relative to the guest buffer,
-	 * exactly like the get_args export contract. */
-	{
-		struct wasm_process_args *v = rel;
-		long off = (long)buf - (long)args;
-		int i;
-
-		for (i = 0; i < v->argc; i++)
-			v->argv[i] += off;
-		for (i = 0; i < v->envc; i++)
-			v->envp[i] += off;
-		v->argv += off / sizeof(void *);
-		v->envp += off / sizeof(void *);
+	out[0] = (unsigned long)args->argc;
+	out[1] = (unsigned long)args->envc;
+	off = 8 + ptrs;
+	for (i = 0; i < args->argc; i++) {
+		size_t sl = strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+		out[2 + i] = (unsigned long)buf + off;
+		off += sl;
+	}
+	for (i = 0; i < args->envc; i++) {
+		size_t sl = strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+		out[2 + args->argc + i] = (unsigned long)buf + off;
+		off += sl;
+	}
+	off = 8 + ptrs;
+	for (i = 0; i < args->argc; i++) {
+		size_t sl = strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+		memcpy((char *)out + off, args->argv[i], sl);
+		off += sl;
+	}
+	for (i = 0; i < args->envc; i++) {
+		size_t sl = strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+		memcpy((char *)out + off, args->envp[i], sl);
+		off += sl;
 	}
 
-	if (copy_to_user(buf, rel, total)) {
-		kfree(rel);
+	if (copy_to_user(buf, out, total)) {
+		kfree(out);
 		return -EFAULT;
 	}
-	kfree(rel);
+	kfree(out);
 	return args->argc;
 }
 
