@@ -29,6 +29,10 @@ struct virtio_wasm_device {
 
 	bool interrupt_is_config;
 	bool interrupt_is_vring;
+	/* Z1-GABI: virtio setup issues Suspending host imports, which may only
+	 * run on task continuations (never on the kernel_init root stack) —
+	 * deferred to a workqueue kworker. */
+	struct work_struct setup_work;
 };
 
 static void vw_get(struct virtio_device *vdev, unsigned offset, void *buf,
@@ -53,16 +57,15 @@ static void vw_set(struct virtio_device *vdev, unsigned offset, const void *buf,
 	memcpy(vw_dev->config + offset, buf, len);
 }
 
-static void _notify(void *arg)
-{
-	struct virtqueue *vq = arg;
-	struct virtio_wasm_device *vw_dev = to_virtio_wasm_device(vq->vdev);
-	wasm_virtio_notify(vw_dev->host_id, vq->index);
-}
-
 static bool vw_notify(struct virtqueue *vq)
 {
-	wasm_kernel_run_on_main(_notify, vq);
+	struct virtio_wasm_device *vw_dev = to_virtio_wasm_device(vq->vdev);
+	/* Z1-GABI: call the import DIRECTLY on the current kernel
+	 * continuation (suspend-capable). The old run_on_main indirection
+	 * executed _notify on a plain JS stack where the Suspending import
+	 * cannot suspend -> SuspendError -> read never completes. */
+	pr_info("Z1VIRTIO: vw_notify kicking vq %u\n", vq->index);
+	wasm_virtio_notify(vw_dev->host_id, vq->index);
 	return true;
 }
 
@@ -100,13 +103,6 @@ static void vw_reset(struct virtio_device *vdev)
 	vw_set_status(vdev, 0);
 }
 
-static void _disable(void *arg)
-{
-	struct virtqueue *vq = arg;
-	struct virtio_wasm_device *vw_dev = to_virtio_wasm_device(vq->vdev);
-	wasm_virtio_disable_vring(vw_dev->host_id, vq->index);
-}
-
 static void vw_del_vqs(struct virtio_device *vdev)
 {
 	struct virtio_wasm_device *vw_dev = to_virtio_wasm_device(vdev);
@@ -114,7 +110,7 @@ static void vw_del_vqs(struct virtio_device *vdev)
 
 	list_for_each_entry_safe(vq, n, &vdev->vqs, list) {
 		vring_del_virtqueue(vq);
-		wasm_kernel_run_on_main(_disable, vq);
+		wasm_virtio_disable_vring(vw_dev->host_id, vq->index);
 	}
 
 	free_irq(vw_dev->irq, vw_dev);
@@ -145,15 +141,6 @@ static irqreturn_t vw_interrupt(int irq, void *dev)
 	return ret;
 }
 
-static void _enable(void *arg)
-{
-	struct virtqueue *vq = arg;
-	struct virtio_wasm_device *vw_dev = to_virtio_wasm_device(vq->vdev);
-	wasm_virtio_enable_vring(vw_dev->host_id, vq->index,
-				 virtqueue_get_vring_size(vq),
-				 virtqueue_get_desc_addr(vq));
-}
-
 static struct virtqueue *vw_setup_vq(struct virtio_device *vdev, unsigned index,
 				     vq_callback_t *callback, const char *name,
 				     bool ctx)
@@ -167,7 +154,14 @@ static struct virtqueue *vw_setup_vq(struct virtio_device *vdev, unsigned index,
 		return ERR_PTR(-ENOMEM);
 	vq->num_max = num;
 
-	wasm_kernel_run_on_main(_enable, vq);
+	/* Z1-GABI: direct import call (suspend-capable continuation). */
+	{
+		struct virtio_wasm_device *vw_dev =
+			to_virtio_wasm_device(vdev);
+		wasm_virtio_enable_vring(vw_dev->host_id, vq->index,
+					 virtqueue_get_vring_size(vq),
+					 virtqueue_get_desc_addr(vq));
+	}
 
 	return vq;
 }
@@ -210,17 +204,15 @@ static u64 vw_get_features(struct virtio_device *vdev)
 	return vw_dev->features;
 }
 
-static void _finalize_features(void *arg)
-{
-	struct virtio_device *vdev = arg;
-	struct virtio_wasm_device *vw_dev = to_virtio_wasm_device(vdev);
-	wasm_virtio_set_features(vw_dev->host_id, vdev->features);
-}
-
 static int vw_finalize_features(struct virtio_device *vdev)
 {
 	vring_transport_features(vdev);
-	wasm_kernel_run_on_main(_finalize_features, vdev);
+	/* Z1-GABI: direct import call (suspend-capable continuation). */
+	{
+		struct virtio_wasm_device *vw_dev =
+			to_virtio_wasm_device(vdev);
+		wasm_virtio_set_features(vw_dev->host_id, vdev->features);
+	}
 	return 0;
 }
 
@@ -250,13 +242,21 @@ static void virtio_wasm_release_dev(struct device *_d)
 	kfree(vw_dev);
 }
 
-static void _setup(void *arg)
+static void virtio_wasm_setup_work(struct work_struct *w)
 {
-	struct virtio_wasm_device *vw_dev = arg;
+	struct virtio_wasm_device *vw_dev =
+		container_of(w, struct virtio_wasm_device, setup_work);
+	int rc;
+
+	pr_info("Z1VIRTIO: setup work running (kworker continuation)\n");
 	wasm_virtio_setup(vw_dev->host_id, vw_dev->irq,
 			  &vw_dev->interrupt_is_config,
 			  &vw_dev->interrupt_is_vring, vw_dev->config,
 			  vw_dev->config_len);
+
+	rc = register_virtio_device(&vw_dev->vdev);
+	if (rc)
+		put_device(&vw_dev->vdev.dev);
 }
 
 static int virtio_wasm_probe(struct platform_device *pdev)
@@ -312,14 +312,12 @@ static int virtio_wasm_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, vw_dev);
 
-	wasm_kernel_run_on_main(_setup, vw_dev);
-
-	rc = register_virtio_device(&vw_dev->vdev);
-	if (rc) {
-		put_device(&vw_dev->vdev.dev);
-		goto error;
-	}
-
+	/* Z1-GABI: the root stack (kernel_init) cannot suspend JSPI imports —
+	 * wasm_virtio_setup/enable_vring are Suspending round-trips to the
+	 * device host. Defer setup+registration to a workqueue kworker, whose
+	 * continuation is a real suspend-capable task. */
+	INIT_WORK(&vw_dev->setup_work, virtio_wasm_setup_work);
+	schedule_work(&vw_dev->setup_work);
 	return 0;
 error:
 	kfree(vw_dev);

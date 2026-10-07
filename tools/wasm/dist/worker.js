@@ -1160,17 +1160,29 @@ self.onmessage = (event) => {
                         });
                     });
                 },
-                virtioResult(seq, ok, value) {
+                virtioResult(seq, ok, value, irq) {
                     const pending = virtioPending.get(seq);
-                    if (!pending) {
-                        postK5Diag("VIRTIO_RESULT_UNATTRIBUTED", false, { seq });
-                        return;
+                    postK5Diag("Z1VIRTIO_RESULT", ok, { seq, ok, value, irq: irq ?? null });
+                    if (pending) {
+                        virtioPending.delete(seq);
+                        if (ok)
+                            pending.resolve(value);
+                        else
+                            pending.reject(new Error(`virtio op failed (seq=${seq})`));
                     }
-                    virtioPending.delete(seq);
-                    if (ok)
-                        pending.resolve(value);
-                    else
-                        pending.reject(new Error(`virtio op failed (seq=${seq})`));
+                    // Z1-GABI: fire-and-forget virtio imports complete via a DEDICATED
+                    // IRQ continuation (promising startTask-like stack — the only
+                    // suspend-safe way to re-enter kernel code). Spurious IRQs are
+                    // harmless: the driver finds an empty used ring.
+                    if (typeof irq === "number" && irq > 0 && instance) {
+                        const triggerIrq = wasmJspi.promising(instance.exports.trigger_irq_for_cpu);
+                        triggerIrq(0, irq).catch((e) => {
+                            postK5Diag("Z1VIRTIO_IRQ_FAILED", false, {
+                                irq,
+                                error: String(e?.message ?? e).slice(0, 120),
+                            });
+                        });
+                    }
                 },
                 userTaskError(taskToken, reason, faultClass) {
                     const t = tasks.get(taskToken);
@@ -1275,6 +1287,15 @@ self.onmessage = (event) => {
             };
             const virtioCall = (dev, op, args, features) => {
                 const seq = nextVirtioSeq++;
+                // Z1-GABI boundary instrumentation: first missing transition of the
+                // block READ path (z1-gabi-virtio-boundary-analysis.json).
+                postK5Diag("Z1VIRTIO_CMD_POSTED", true, {
+                    seq,
+                    dev,
+                    op,
+                    args: JSON.stringify(args),
+                    features: features?.toString(16) ?? null,
+                });
                 return new Promise((resolve, reject) => {
                     virtioPending.set(seq, { resolve, reject });
                     postMessage({ type: "virtio_cmd", seq, dev, op, args, features });
@@ -1377,8 +1398,23 @@ self.onmessage = (event) => {
                         if (typeof tableEntry !== "function") {
                             throw new Error(`[K5A] run_on_main fn=${fn} not found`);
                         }
-                        const entryFn = tableEntry;
-                        entryFn(arg);
+                        // Z1-GABI: run the kernel function on a JSPI-CAPABLE stack.
+                        // Direct entryFn(arg) runs on THIS handler's plain JS stack, where
+                        // any Suspending import the kernel fn calls (virtio.setup/notify
+                        // from virtio_wasm_probe -> _setup) throws
+                        // SuspendError: trying to suspend JS frames — the probe then fails
+                        // silently (driver core logs pr_debug) and root=/dev/vda never
+                        // registers. promising() gives the call a suspendable stack; the
+                        // returned promise settles when the fn returns (fire-and-forget:
+                        // probe completion is the kernel's concern).
+                        const promisingEntry = wasmJspi.promising(tableEntry);
+                        const p = promisingEntry(arg);
+                        p.catch((err) => {
+                            postK5Diag("Z1_RUN_ON_MAIN_FAILED", false, {
+                                fn,
+                                error: String(err?.message ?? err).slice(0, 200),
+                            });
+                        });
                     },
                     get_user_module: () => currentTask().userModule,
                     get_user_memory: () => currentTask().userMemory,
@@ -1514,19 +1550,36 @@ self.onmessage = (event) => {
                     },
                 },
                 virtio: {
-                    // Suspending round-trips to main: devices live in the main process;
-                    // the kernel continuation parks until the device op completes.
-                    set_features: new SuspendingCtor((dev, features) => virtioCall(dev, "set_features", [], features)),
-                    setup: new SuspendingCtor((dev, irq, is_config_addr, is_vring_addr, config_addr, config_len) => virtioCall(dev, "setup", [
-                        irq,
-                        is_config_addr,
-                        is_vring_addr,
-                        config_addr,
-                        config_len,
-                    ])),
-                    enable_vring: new SuspendingCtor((dev, vq, size, desc_addr) => virtioCall(dev, "enable_vring", [vq, size, desc_addr])),
-                    disable_vring: new SuspendingCtor((dev, vq) => virtioCall(dev, "disable_vring", [vq])),
-                    notify: new SuspendingCtor((dev, vq) => virtioCall(dev, "notify", [vq])),
+                    // Z1-GABI: FIRE-AND-FORGET imports. Suspending imports called from
+                    // arbitrary kernel contexts (virtio probe initcalls, workqueue
+                    // items) suspend on stacks that never cooperate with
+                    // kwa_context_suspend -> running_cpu bookkeeping corrupts ->
+                    // BUG_ON(__switch_to). Fire-and-forget returns immediately; the
+                    // device op completes asynchronously on main, and completion is
+                    // delivered as a DEDICATED IRQ continuation
+                    // (promising(trigger_irq_for_cpu)) — the same proven pattern as
+                    // the timer IRQ (startTask-like dedicated stack).
+                    set_features: (dev, features) => {
+                        void virtioCall(dev, "set_features", [], features);
+                    },
+                    setup: (dev, irq, is_config_addr, is_vring_addr, config_addr, config_len) => {
+                        void virtioCall(dev, "setup", [
+                            irq,
+                            is_config_addr,
+                            is_vring_addr,
+                            config_addr,
+                            config_len,
+                        ]);
+                    },
+                    enable_vring: (dev, vq, size, desc_addr) => {
+                        void virtioCall(dev, "enable_vring", [vq, size, desc_addr]);
+                    },
+                    disable_vring: (dev, vq) => {
+                        void virtioCall(dev, "disable_vring", [vq]);
+                    },
+                    notify: (dev, vq) => {
+                        void virtioCall(dev, "notify", [vq]);
+                    },
                 },
             };
             currentStage = "AFTER_KERNEL_IMPORTS";
