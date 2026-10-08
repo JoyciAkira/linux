@@ -50,6 +50,8 @@ export interface InitMessage {
   mode?: "start" | "switch_entry" | "fork_user";
   /** K5: real child pid for fork_user fork-ack (kernel fork_copied export). */
   forkPid?: number;
+  /** K4+: Captured argv bytes from authority TaskRecord at spawn time. */
+  argv?: Uint8Array | null;
 }
 export type WorkerMessage =
   | {
@@ -70,6 +72,7 @@ export type WorkerMessage =
     taskToken?: number;
     mode?: "start" | "switch_entry" | "fork_user";
     forkPid?: number;
+    argv?: Uint8Array | null;
   }
   | { type: "boot_console_write"; message: ArrayBuffer }
   | { type: "boot_console_close" }
@@ -234,6 +237,7 @@ function user_imports({
   brokerSab,
   workerId,
   taskToken,
+  tasksMap,
 }: {
   kernel_memory: WebAssembly.Memory;
   get_kernel_instance: () => Instance;
@@ -244,6 +248,8 @@ function user_imports({
   workerId?: number;
   /** K5: KERNEL-OWNED task token — sent as the broker request routing key. */
   taskToken?: number;
+  /** K4+: Authority-scoped task registry for argv metadata in broker-only path. */
+  tasksMap?: Map<number, { argv: Uint8Array | null }>;
 }): {
   module: WebAssembly.Module | null;
   memory: WebAssembly.Memory | null;
@@ -335,9 +341,22 @@ function user_imports({
           // `() => 0` is load-bearing (empty argv / no TLS) until the
           // kernel-side argv/TLS service lands; making them throw breaks
           // every guest boot. Real values are a kernel-rebuild step.
-          get_thread_area: () => 0,
-          get_args_length: () => 0,
-          get_args: () => 0,
+          get_thread_area: () => parent_tls_base ?? 0,
+          get_args_length: () => {
+            if (!taskToken || !tasksMap) return 0;
+            const t = tasksMap.get(taskToken);
+            return t?.argv ? t.argv.byteLength : 0;
+          },
+          get_args: (buf: number, bufsize: number) => {
+            if (!taskToken || !buf || !bufsize || !tasksMap) return 0;
+            const t = tasksMap.get(taskToken);
+            if (!t?.argv) return 0;
+            // Destructive copy: write captured argv into guest memory at buf
+            const len = Math.min(t.argv.byteLength, bufsize);
+            const mem = new Uint8Array(memory!.buffer);
+            mem.set(t.argv.subarray(0, len), buf);
+            return len;
+          },
           arch_wasm_poll: () => 0,
         },
       });
@@ -700,7 +719,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
   }
 
  const { fn, arg, memory, parent_user_module, parent_user_memory,
- parent_tls_base, brokerSab, workerId, mode, taskToken, forkPid } = data;
+ parent_tls_base, brokerSab, workerId, mode, taskToken, forkPid, argv: spawnedArgv } = data;
 
  // K4 DIAG: outer synchronous exception boundary
  let currentStage: K4DiagStage = "INIT_RECEIVED";
@@ -796,6 +815,8 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
         userWorker: Worker | null;
         userWorkerId: number;
         /** In-flight user.call suspension of this task's kernel stack. */
+        /** K4+: Captured argv bytes from guest memory at spawn/exec boundary. */
+        argv: Uint8Array | null;
         pendingCall: {
           resolve: (outcome?: number) => void;
           reject: (reason: unknown) => void;
@@ -1026,6 +1047,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
  pendingCall: null,
  imageId: 0n,
  activeImageId: 0n,
+            argv: null,
           };
           tasks.set(token, t);
         }
@@ -1463,6 +1485,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           workerId,
           mode: t.entryMode,
           forkPid: t.forkPid !== 0 ? t.forkPid : undefined,
+          argv: t.argv ?? undefined,
         } as WorkerMessage);
       };
 
@@ -1739,6 +1762,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
  // spawning task's identity. Boot/shell tasks keep 0n until their own exec.
  imageId: tasks.get(executingTask)?.imageId ?? 0n,
  activeImageId: tasks.get(executingTask)?.imageId ?? 0n,
+              argv: null,
             });
             postK5Diag("TASK_REGISTERED", true, {
               taskToken,
@@ -1873,6 +1897,18 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
             t.entryMode = "switch_entry";
             t.guestFn = fn;
             t.guestArg = arg;
+            // K4+: Capture argv from guest memory at spawn boundary.
+            // arg is a pointer to a null-terminated command string in the
+            // parent's shared VAS. Read up to 4KB to avoid unbounded copies.
+            if (parent.userMemory && arg > 0) {
+              const mem = new Uint8Array(parent.userMemory.buffer);
+              let end = arg;
+              const maxLen = Math.min(4096, mem.byteLength - arg);
+              while (end < arg + maxLen && mem[end] !== 0) end++;
+              t.argv = mem.slice(arg, end);
+            } else {
+              t.argv = null;
+            }
           },
           fork_user(pid: number): void {
             const t = currentTask();
@@ -2066,6 +2102,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
  brokerSab,
  workerId,
  taskToken,
+    tasksMap: spawnedArgv && taskToken ? new Map([[taskToken, { argv: spawnedArgv }]]) : undefined,
  });
  currentStage = "AFTER_USER_IMPORTS";
  postK4Diag("AFTER_USER_IMPORTS", { hasUserImports: !!user.imports, hasModule: !!user.module, hasMemory: !!user.memory });
@@ -2186,11 +2223,13 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
  // decision and MUST NOT be used for any Z1-GABI acceptance criterion.
  // KWA-v2.1 successor must replace this with explicit module/import
  // contract validation (instantiation-time fail-closed).
- const useLegacyMinimalImportRoute = moduleImports.length <= 2 &&
+  // K4+: Detect Linux shell / user modules by their actual import signature, not count.
+  const hasLinuxNamespace = moduleImports.some(i => i.module === "linux");
+  const isLinuxShellModule = hasLinuxNamespace &&
  moduleImports.every(i => i.module === "env" || i.module === "linux");
 
   let userInstance: WebAssembly.Instance;
- if (useLegacyMinimalImportRoute) {
+ if (isLinuxShellModule) {
     // Minimal user module path: bind parent module/memory into user_imports closure,
     // then call doInstantiate() which builds broker-only imports correctly.
     user.module = parent_user_module;
