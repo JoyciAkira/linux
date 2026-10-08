@@ -1168,7 +1168,8 @@ self.onmessage = (event) => {
                     const promisingIrq = wasmJspi.promising(instance.exports.trigger_irq_for_cpu);
                     promisingIrq(cpu, irq)
                         .then(() => {
-                        wakeAllSuspensions(`irq:${irq}`);
+                        // Only idle may be kicked; the kernel assigns CPUs and chooses successors.
+                        kickIdle(`irq:${irq}`);
                     })
                         .catch((error) => {
                         postK5Diag("IRQ_DELIVERY_FAILED", false, {

@@ -1528,7 +1528,8 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           );
           promisingIrq(cpu, irq)
             .then(() => {
-              wakeAllSuspensions(`irq:${irq}`);
+              // Only idle may be kicked; the kernel assigns CPUs and chooses successors.
+              kickIdle(`irq:${irq}`);
             })
             .catch((error: unknown) => {
               postK5Diag("IRQ_DELIVERY_FAILED", false, {
