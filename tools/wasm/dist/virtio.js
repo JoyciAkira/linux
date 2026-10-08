@@ -581,7 +581,7 @@ export class ConsoleDevice extends VirtioDevice {
                     let n = 0;
                     for (const { array, writable } of chain) {
                         assert(!writable, "transmitter must be readable");
-                        await this.#output.write(array);
+                        await this.#output.write(array.slice());
                         n += array.byteLength;
                     }
                     chain.release(n);
@@ -761,10 +761,10 @@ export function virtio_imports({ memory, devices, ncpus, trigger_irq_for_cpu, })
             };
             device.setup_complete();
         },
-        notify(dev, vq) {
+        async notify(dev, vq) {
             const device = devices[dev];
             assert(device);
-            device.notify(vq);
+            await device.notify(vq);
         },
     };
 }

@@ -45,7 +45,7 @@ export declare abstract class VirtioDevice<Config extends object = object> {
     vqs: Virtqueue[];
     enable(vq: number, queue: Virtqueue): void;
     disable(vq: number): void;
-    abstract notify(vq: number): void;
+    abstract notify(vq: number): void | Promise<void>;
     setup_complete(): void;
 }
 declare const EmptyStruct_base: (new (view: ArrayBufferView) => object) & Type<object>;

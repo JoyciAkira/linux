@@ -28,6 +28,8 @@ export interface InitMessage {
     mode?: "start" | "switch_entry" | "fork_user";
     /** K5: real child pid for fork_user fork-ack (kernel fork_copied export). */
     forkPid?: number;
+    /** K4+: Captured argv bytes from authority TaskRecord at spawn time. */
+    argv?: Uint8Array | null;
 }
 export type WorkerMessage = {
     type: "spawn_worker";
@@ -47,6 +49,7 @@ export type WorkerMessage = {
     taskToken?: number;
     mode?: "start" | "switch_entry" | "fork_user";
     forkPid?: number;
+    argv?: Uint8Array | null;
 } | {
     type: "boot_console_write";
     message: ArrayBuffer;
@@ -120,6 +123,7 @@ export type WorkerMessage = {
     seq: number;
     ok: boolean;
     value: number;
+    irq?: number;
 } | {
     type: "authority_broker_kick";
 } | {

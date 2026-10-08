@@ -723,7 +723,7 @@ export class ConsoleDevice extends VirtioDevice<EmptyStruct> {
           let n = 0;
           for (const { array, writable } of chain) {
             assert(!writable, "transmitter must be readable");
-            await this.#output.write(array);
+            await this.#output.write(array.slice());
             n += array.byteLength;
           }
           chain.release(n);
