@@ -64,7 +64,6 @@ static bool vw_notify(struct virtqueue *vq)
 	 * continuation (suspend-capable). The old run_on_main indirection
 	 * executed _notify on a plain JS stack where the Suspending import
 	 * cannot suspend -> SuspendError -> read never completes. */
-	pr_info("Z1VIRTIO: vw_notify kicking vq %u\n", vq->index);
 	wasm_virtio_notify(vw_dev->host_id, vq->index);
 	return true;
 }
