@@ -336,9 +336,10 @@ export class Machine extends EventEmitter<{
     // worker) reaches them through virtio_cmd/virtio_result round-trips and
     // receives IRQs back through authority_irq.
     let vimports: Imports["virtio"] | null = null;
+    const deviceIrqs = new Map<number, number>();
 
     const wireWorker = (worker: Worker) => {
-      worker.onmessage = (
+      worker.onmessage = async (
         event: MessageEvent<WorkerMessage | RawProcessEventMessage>,
       ) => {
         switch (event.data.type) {
@@ -469,6 +470,7 @@ export class Machine extends EventEmitter<{
               if (op === "set_features") {
                 callVirtio.set_features(dev, event.data.features ?? 0n);
               } else if (op === "setup") {
+                deviceIrqs.set(dev, args[0]!);
                 callVirtio.setup(
                   dev,
                   args[0]!,
@@ -482,20 +484,24 @@ export class Machine extends EventEmitter<{
               } else if (op === "disable_vring") {
                 callVirtio.disable_vring(dev, args[0]!);
               } else {
-                callVirtio.notify(dev, args[0]!);
+                await Promise.resolve(callVirtio.notify(dev, args[0]!));
               }
+              const deviceIrq = deviceIrqs.get(dev);
               worker.postMessage({
                 type: "virtio_result",
                 seq,
                 ok: true,
                 value: 0,
+                irq: deviceIrq,
               });
             } catch (error) {
+              const deviceIrq = deviceIrqs.get(dev);
               worker.postMessage({
                 type: "virtio_result",
                 seq,
                 ok: false,
                 value: 0,
+                irq: deviceIrq,
               });
               console.error(
                 `[K5] virtio ${op} dev=${dev} failed:`,

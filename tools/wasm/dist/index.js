@@ -205,8 +205,9 @@ export class Machine extends EventEmitter {
         // worker) reaches them through virtio_cmd/virtio_result round-trips and
         // receives IRQs back through authority_irq.
         let vimports = null;
+        const deviceIrqs = new Map();
         const wireWorker = (worker) => {
-            worker.onmessage = (event) => {
+            worker.onmessage = async (event) => {
                 switch (event.data.type) {
                     case "spawn_worker":
                         spawn_worker(event.data.fn, event.data.arg, event.data.name, event.data.user_module, event.data.user_memory, event.data.workerId, event.data.taskToken, event.data.mode, event.data.forkPid);
@@ -301,6 +302,7 @@ export class Machine extends EventEmitter {
                                 callVirtio.set_features(dev, event.data.features ?? 0n);
                             }
                             else if (op === "setup") {
+                                deviceIrqs.set(dev, args[0]);
                                 callVirtio.setup(dev, args[0], args[1], args[2], args[3], args[4]);
                             }
                             else if (op === "enable_vring") {
@@ -310,21 +312,25 @@ export class Machine extends EventEmitter {
                                 callVirtio.disable_vring(dev, args[0]);
                             }
                             else {
-                                callVirtio.notify(dev, args[0]);
+                                await Promise.resolve(callVirtio.notify(dev, args[0]));
                             }
+                            const deviceIrq = deviceIrqs.get(dev);
                             worker.postMessage({
                                 type: "virtio_result",
                                 seq,
                                 ok: true,
                                 value: 0,
+                                irq: deviceIrq,
                             });
                         }
                         catch (error) {
+                            const deviceIrq = deviceIrqs.get(dev);
                             worker.postMessage({
                                 type: "virtio_result",
                                 seq,
                                 ok: false,
                                 value: 0,
+                                irq: deviceIrq,
                             });
                             console.error(`[K5] virtio ${op} dev=${dev} failed:`, String(error?.message ?? error));
                         }
