@@ -311,12 +311,19 @@ static int virtio_wasm_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, vw_dev);
 
-	/* Z1-GABI: the root stack (kernel_init) cannot suspend JSPI imports —
-	 * wasm_virtio_setup/enable_vring are Suspending round-trips to the
-	 * device host. Defer setup+registration to a workqueue kworker, whose
-	 * continuation is a real suspend-capable task. */
-	INIT_WORK(&vw_dev->setup_work, virtio_wasm_setup_work);
-	schedule_work(&vw_dev->setup_work);
+	/* Z1-GABI: virtio imports are fire-and-forget; no JSPI suspension
+	 * occurs on probe calls. Synchronous setup guarantees hvc0 and vda
+	 * are registered before console_on_rootfs() and root mount. */
+	wasm_virtio_setup(vw_dev->host_id, vw_dev->irq,
+			  &vw_dev->interrupt_is_config,
+			  &vw_dev->interrupt_is_vring, vw_dev->config,
+			  vw_dev->config_len);
+
+	rc = register_virtio_device(&vw_dev->vdev);
+	if (rc) {
+		put_device(&vw_dev->vdev.dev);
+		goto error;
+	}
 	return 0;
 error:
 	kfree(vw_dev);
