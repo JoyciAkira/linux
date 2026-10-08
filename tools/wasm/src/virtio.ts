@@ -190,7 +190,7 @@ export abstract class VirtioDevice<Config extends object = object> {
     assert(queue);
   }
 
-  abstract notify(vq: number): void;
+  abstract notify(vq: number): void | Promise<void>;
 
   setup_complete() {}
 }
@@ -958,10 +958,10 @@ export function virtio_imports({
       device.setup_complete();
     },
 
-    notify(dev, vq) {
+    async notify(dev, vq) {
       const device = devices[dev];
       assert(device);
-      device.notify(vq);
+      await device.notify(vq);
     },
   };
 }
