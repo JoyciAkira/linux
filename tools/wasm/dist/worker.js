@@ -1794,9 +1794,67 @@ self.onmessage = (event) => {
             return {
                 syscall: z1BrokerSyscall,
                 // Z1-GABI NOTE: frozen-kernel ABI placeholders (see user_imports).
-                get_thread_area: () => 0,
-                get_args_length: () => 0,
-                get_args: () => 0,
+                get_thread_area: () => parent_tls_base ?? 0,
+                get_args_length: () => {
+                    let args = ["/bin/sh"];
+                    if (spawnedArgv && spawnedArgv.byteLength > 0) {
+                        const text = new TextDecoder().decode(spawnedArgv).replace(/\0+$/, "");
+                        if (text.length > 0)
+                            args = text.split(" ").filter(Boolean);
+                    }
+                    let strBytes = 0;
+                    for (const a of args)
+                        strBytes += new TextEncoder().encode(a + "\0").length;
+                    return 20 + (args.length + 1) * 4 + 4 + strBytes;
+                },
+                get_args: (buf) => {
+                    if (!buf || !memory)
+                        return -1;
+                    let args = ["/bin/sh"];
+                    if (spawnedArgv && spawnedArgv.byteLength > 0) {
+                        const text = new TextDecoder().decode(spawnedArgv).replace(/\0+$/, "");
+                        if (text.length > 0)
+                            args = text.split(" ").filter(Boolean);
+                    }
+                    const dv = new DataView(memory.buffer, buf);
+                    const argc = args.length;
+                    const envc = 0;
+                    const argvPtr = buf + 20;
+                    const envpPtr = argvPtr + (argc + 1) * 4;
+                    const strPtr = envpPtr + (envc + 1) * 4;
+                    const encoded = [];
+                    let totalStrLen = 0;
+                    for (const a of args) {
+                        const b = new TextEncoder().encode(a + "\0");
+                        encoded.push(b);
+                        totalStrLen += b.length;
+                    }
+                    // wasm_process_args header: len, envc, argc, argv_ptr, envp_ptr
+                    dv.setInt32(0, totalStrLen, true);
+                    dv.setInt32(4, envc, true);
+                    dv.setInt32(8, argc, true);
+                    dv.setInt32(12, argvPtr, true);
+                    dv.setInt32(16, envpPtr, true);
+                    // argv pointers table
+                    let off = 20;
+                    let currStrPtr = strPtr;
+                    for (let j = 0; j < argc; j++) {
+                        dv.setInt32(off, currStrPtr, true);
+                        off += 4;
+                        currStrPtr += encoded[j].length;
+                    }
+                    dv.setInt32(off, 0, true);
+                    // envp pointers table (NULL)
+                    dv.setInt32(envpPtr - buf, 0, true);
+                    // string data
+                    const memU8 = new Uint8Array(memory.buffer);
+                    let sOff = strPtr;
+                    for (const enc of encoded) {
+                        memU8.set(enc, sOff);
+                        sOff += enc.length;
+                    }
+                    return 0;
+                },
                 arch_wasm_poll: () => 0,
             };
         })();
