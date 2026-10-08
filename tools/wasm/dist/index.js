@@ -210,7 +210,7 @@ export class Machine extends EventEmitter {
             worker.onmessage = async (event) => {
                 switch (event.data.type) {
                     case "spawn_worker":
-                        spawn_worker(event.data.fn, event.data.arg, event.data.name, event.data.user_module, event.data.user_memory, event.data.workerId, event.data.taskToken, event.data.mode, event.data.forkPid);
+                        spawn_worker(event.data.fn, event.data.arg, event.data.name, event.data.user_module, event.data.user_memory, event.data.workerId, event.data.taskToken, event.data.mode, event.data.forkPid, event.data.argv);
                         break;
                     case "boot_console_write":
                         boot_console_write(event.data.message);
@@ -351,7 +351,7 @@ export class Machine extends EventEmitter {
                 this.emit("error", event);
             };
         };
-        const spawn_worker = (fn, arg, name, user_module, user_memory, workerId, taskToken, mode, forkPid) => {
+        const spawn_worker = (fn, arg, name, user_module, user_memory, workerId, taskToken, mode, forkPid, argv) => {
             console.log(`[SPW] fn=${fn} name=${name} umodule=${typeof user_module}:${String(user_module).slice(0, 40)} umem=${typeof user_memory}:${String(user_memory)} taskToken=${taskToken} mode=${mode}`);
             const worker = new Worker(new URL("./worker.js", import.meta.url), {
                 type: "module",
@@ -374,6 +374,7 @@ export class Machine extends EventEmitter {
                 taskToken,
                 mode,
                 forkPid,
+                argv,
                 d1TraceEnabled: this.#d1_trace_enabled,
                 d1RunId: this.#d1_run_id,
             });

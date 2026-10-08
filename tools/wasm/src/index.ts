@@ -354,6 +354,7 @@ export class Machine extends EventEmitter<{
               event.data.taskToken,
               event.data.mode,
               event.data.forkPid,
+              event.data.argv,
             );
             break;
           case "boot_console_write":
@@ -536,6 +537,7 @@ export class Machine extends EventEmitter<{
       taskToken?: number,
       mode?: InitMessage["mode"],
       forkPid?: number,
+      argv?: Uint8Array | null,
     ) => {
       console.log(
         `[SPW] fn=${fn} name=${name} umodule=${typeof user_module}:${String(user_module).slice(0, 40)} umem=${typeof user_memory}:${String(user_memory)} taskToken=${taskToken} mode=${mode}`,
@@ -562,6 +564,7 @@ export class Machine extends EventEmitter<{
           taskToken,
           mode,
           forkPid,
+          argv,
           d1TraceEnabled: this.#d1_trace_enabled,
           d1RunId: this.#d1_run_id,
         } satisfies InitMessage,
