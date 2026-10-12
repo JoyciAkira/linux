@@ -94,7 +94,7 @@ void wasm_import(virtio, setup)(u32 id, u32 irq, bool *is_config,
 				bool *is_vring, u8 *config, u32 config_len);
 
 void wasm_import(virtio, enable_vring)(u32 id, u32 index, u32 size,
-				       dma_addr_t desc);
+					  u32 desc_addr, u32 dev_evt_addr);
 void wasm_import(virtio, disable_vring)(u32 id, u32 index);
 
 void wasm_import(virtio, notify)(u32 id, u32 index);

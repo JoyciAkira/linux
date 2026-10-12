@@ -33,7 +33,9 @@ declare class Virtqueue {
     used_wrap: boolean;
     used_idx: number;
     avail_idx: number;
-    constructor(mem: DataView, size: number, desc_addr: number);
+    constructor(mem: DataView, size: number, desc_addr: number, dev_evt_addr: number);
+    /** Publish { off_wrap (ignored), flags: ENABLE(0) } — always-notify. */
+    publish_device_event(): void;
     [Symbol.iterator](): Generator<Chain, void, unknown>;
 }
 export declare abstract class VirtioDevice<Config extends object = object> {
@@ -108,11 +110,25 @@ export declare class BlockDevice extends VirtioDevice<BlockDeviceConfig> {
     constructor(storage: BlockDeviceStorage);
     notify(vq: number): Promise<void>;
 }
-export declare class ConsoleDevice extends VirtioDevice<EmptyStruct> {
+declare const VirtioConsoleConfig_base: (new (view: ArrayBufferView) => {
+    cols: number;
+    rows: number;
+    max_nr_ports: number;
+    emerg_wr: number;
+}) & Type<{
+    cols: number;
+    rows: number;
+    max_nr_ports: number;
+    emerg_wr: number;
+}>;
+declare class VirtioConsoleConfig extends VirtioConsoleConfig_base {
+}
+export declare class ConsoleDevice extends VirtioDevice<VirtioConsoleConfig> {
     #private;
     ID: number;
     config_bytes: Uint8Array<ArrayBuffer>;
-    config: EmptyStruct;
+    config: VirtioConsoleConfig;
+    features: bigint;
     constructor(input: ReadableStream<Uint8Array>, output: WritableStream<Uint8Array>);
     notify(vq: number): Promise<void>;
 }

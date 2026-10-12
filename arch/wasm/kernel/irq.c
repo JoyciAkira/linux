@@ -66,11 +66,21 @@ void __cpuidle arch_cpu_idle(void)
 	raw_local_irq_enable();
 }
 
+void z1_llog(u32 type, u32 lock_id, u32 site, u32 token, u32 data);
+
 void cpu_relax(void)
 {
 	unsigned long flags;
 	struct kwa_exec_ctx ctx;
 	local_irq_save(flags);
+	/* Z1-F11-C: yields with IRQs disabled (i.e. holding a spinlock or in
+	 * IRQ context) park the holder — if the resume machinery ever loses
+	 * this one, every waiter on the held lock hangs with it. Ring-buffer
+	 * logging only: printk would recurse into the TTY path under study. */
+	/* C3-A rev2: type-3 events removed from the ring — at ~100/s they
+	 * wrapped the 256-entry buffer before any dump, drowning the lock
+	 * events. Atomic-yield volume is already established (1003/71s). */
+	(void)0;
 	// K5: bounded self-resume yield; the authority event loop breathes and
 	// resumes this same task after the deadline.
 	kwa_context_suspend(&ctx, KWA_YIELD_RELAX,

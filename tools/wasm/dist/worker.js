@@ -77,12 +77,16 @@ function user_imports({ kernel_memory, get_kernel_instance, parent_user_module: 
     const doInstantiate = () => {
         assert(module);
         if (!memory) {
-            const initial = 12288; // 768 MiB
-            const maximum = 32768; // 2 GiB tetto
+            // Z1-F11-C4-D: reduce initial memory for light guests to avoid
+            // renderer OOM. Use module size as heuristic: blink is ~450KB,
+            // light guests (hush/xexit) are <10KB.
+            const isHeavy = module.byteLength > 100 * 1024; // >100KB = heavy
+            const initial = isHeavy ? 12288 : 1024; // 768MiB vs 64MiB
+            const maximum = 32768; // 2 GiB
             memory = new WebAssembly.Memory({ initial, maximum, shared: true });
             if (d1TraceEnabled) {
                 d1TraceBuffer.recordLifecycle("wasm_memory_constructed", d1RunId, {
-                    detail: `initial=${initial} maximum=${maximum}`,
+                    detail: `initial=${initial} maximum=${maximum} moduleBytes=${module.byteLength}`,
                 });
             }
         }
@@ -105,10 +109,17 @@ function user_imports({ kernel_memory, get_kernel_instance, parent_user_module: 
             }
             const brokerClient = new BrokerClient(brokerSab, workerId);
             const originalSyscallHandler = (nr, arg0, arg1, arg2, arg3, arg4, arg5) => {
+                // Z1-F11: cache the image's self-installed TLS base locally — musl
+                // calls set_thread_area(244) before any TLS dereference, so the
+                // get_thread_area import below never needs a broker round-trip
+                // (broker calls during worker init deadlock the spawn handshake).
+                if (nr === 244 /* set_thread_area */ && arg0)
+                    localTlsBase = arg0;
                 return brokerClient.invoke(nr, arg0, arg1, arg2, arg3, arg4, arg5, taskToken ?? 0, 0, () => {
                     postMessage({ type: "broker_kick", workerId });
                 }).result;
             };
+            let localTlsBase = 0;
             const wrappedSyscallHandler = wrapSyscall(originalSyscallHandler, {
                 buffer: d1TraceBuffer,
                 runId: d1RunId,
@@ -120,17 +131,22 @@ function user_imports({ kernel_memory, get_kernel_instance, parent_user_module: 
                 env: { memory },
                 linux: {
                     syscall: wrappedSyscallHandler,
-                    // Z1-GABI NOTE: these three are part of the FROZEN kernel ABI
-                    // (bbe4f538 calls them synchronously during guest task setup).
-                    // `() => 0` is load-bearing (empty argv / no TLS) until the
-                    // kernel-side argv/TLS service lands; making them throw breaks
-                    // every guest boot. Real values are a kernel-rebuild step.
-                    get_thread_area: () => parent_tls_base ?? 0,
+                    // Z1-F11-C5-6: the images' libc contract at INIT is tp=0 (frozen
+                    // K5 ABI — blink runs its full init with 0 and self-registers TLS
+                    // via set_thread_area 244). A nonzero tp at init deadlocks blink's
+                    // pre-clone init in a userspace CAS loop.
+                    get_thread_area: () => 0,
                     get_args_length: () => {
-                        const raw = taskToken && tasksMap ? tasksMap.get(taskToken)?.argv : null;
+                        const t = taskToken && tasksMap ? tasksMap.get(taskToken) : null;
+                        // Z1-F11-S1: Prefer kernel-authoritative argvLen when available.
+                        if (t?.argvLen && t.argvLen > 20)
+                            return t.argvLen;
+                        const raw = t?.argv ?? null;
                         let args = ["/bin/sh"];
                         if (raw && raw.byteLength > 0) {
-                            const text = new TextDecoder().decode(raw).replace(/\0+$/, "");
+                            const text = new TextDecoder()
+                                .decode(raw)
+                                .replace(/[\0\n]+$/, "");
                             if (text.length > 0)
                                 args = text.split(" ").filter(Boolean);
                         }
@@ -142,13 +158,59 @@ function user_imports({ kernel_memory, get_kernel_instance, parent_user_module: 
                     get_args: (buf) => {
                         if (!buf || !memory)
                             return -1;
-                        const raw = taskToken && tasksMap ? tasksMap.get(taskToken)?.argv : null;
+                        const t = taskToken && tasksMap ? tasksMap.get(taskToken) : null;
+                        // Z1-F11-S1: LOCAL-FIRST. The spawn message bytes (tasksMap.argv)
+                        // are the child's authoritative argv — building the binfmt struct
+                        // locally avoids a broker round-trip during worker init, which
+                        // deadlocked against the spawn handshake (blink hung before its
+                        // first syscall). NR 245 remains as fallback for argv-less tasks.
+                        if (!(t?.argv && t.argv.byteLength > 0) && t?.argvLen && t.argvLen > 20) {
+                            const L = t.argvLen;
+                            const r = brokerClient.invoke(245, buf, L, 0, 0, 0, 0, taskToken ?? 0, 0, () => {
+                                postMessage({ type: "broker_kick", workerId });
+                            }).result;
+                            if (typeof r === "number" && r > 0) {
+                                // Repack compact layout [argc@0,envc@4,ptrs@8..,strings]
+                                // to binfmt wasm_process_args [len@0,envc@4,argc@8,argvPtr@12,envpPtr@16,tables,strings].
+                                const dv = new DataView(memory.buffer);
+                                const argc = dv.getInt32(buf, true);
+                                const envc = dv.getInt32(buf + 4, true);
+                                const strOld = buf + 8 + (argc + envc) * 4;
+                                const argvNew = buf + 20;
+                                const envpNew = argvNew + (argc + 1) * 4;
+                                const strNew = envpNew + (envc + 1) * 4;
+                                const delta = strNew - strOld;
+                                const stringsLen = (buf + L) - strOld;
+                                const tmp = new Uint8Array(stringsLen);
+                                tmp.set(new Uint8Array(memory.buffer, strOld, stringsLen));
+                                dv.setInt32(buf, L, true);
+                                dv.setInt32(buf + 4, envc, true);
+                                dv.setInt32(buf + 8, argc, true);
+                                dv.setInt32(buf + 12, argvNew, true);
+                                dv.setInt32(buf + 16, envpNew, true);
+                                for (let i = 0; i < argc; i++)
+                                    dv.setUint32(argvNew + i * 4, dv.getUint32(buf + 8 + i * 4, true) + delta, true);
+                                for (let j = 0; j < envc; j++)
+                                    dv.setUint32(envpNew + j * 4, dv.getUint32(buf + 8 + argc * 4 + j * 4, true) + delta, true);
+                                dv.setUint32(argvNew + argc * 4, 0, true);
+                                dv.setUint32(envpNew + envc * 4, 0, true);
+                                new Uint8Array(memory.buffer).set(tmp, strNew);
+                                return 0;
+                            }
+                            // Syscall failed — fall through to text fallback
+                        }
+                        const raw = t?.argv ?? null;
                         let args = ["/bin/sh"];
                         if (raw && raw.byteLength > 0) {
                             const text = new TextDecoder().decode(raw).replace(/\0+$/, "");
                             if (text.length > 0)
                                 args = text.split(" ").filter(Boolean);
                         }
+                        // get_args IMPORT ABI (K4/K5-proven): header-style struct
+                        // [len@0, envc@4, argc@8, argvPtr@12, envpPtr@16, tables,
+                        // strings]. NOTE: the COMPACT layout (argc@0, ptrs@8) is the
+                        // SYSCALL-245 kernel format (z1-gabi-app.wat consumer) — do not
+                        // confuse the two interfaces.
                         const dv = new DataView(memory.buffer, buf);
                         const argc = args.length;
                         const envc = 0;
@@ -162,13 +224,11 @@ function user_imports({ kernel_memory, get_kernel_instance, parent_user_module: 
                             encoded.push(b);
                             totalStrLen += b.length;
                         }
-                        // wasm_process_args header: len, envc, argc, argv_ptr, envp_ptr
                         dv.setInt32(0, totalStrLen, true);
                         dv.setInt32(4, envc, true);
                         dv.setInt32(8, argc, true);
                         dv.setInt32(12, argvPtr, true);
                         dv.setInt32(16, envpPtr, true);
-                        // argv pointers table
                         let off = 20;
                         let currStrPtr = strPtr;
                         for (let i = 0; i < argc; i++) {
@@ -177,14 +237,22 @@ function user_imports({ kernel_memory, get_kernel_instance, parent_user_module: 
                             currStrPtr += encoded[i].length;
                         }
                         dv.setInt32(off, 0, true);
-                        // envp pointers table (NULL)
                         dv.setInt32(envpPtr - buf, 0, true);
-                        // string data
                         const memU8 = new Uint8Array(memory.buffer);
                         let sOff = strPtr;
                         for (const enc of encoded) {
                             memU8.set(enc, sOff);
                             sOff += enc.length;
+                        }
+                        // Z1-F11-C3-A: log the SERVED argv (postK5Diag — the kernel
+                        // ldiag ring is not reachable from the secondary worker).
+                        {
+                            const text = args.join(" ");
+                            postK5Diag("Z1_ARGS_SERVED", true, {
+                                taskToken: taskToken ?? 0,
+                                argc: args.length,
+                                text: text.slice(0, 80),
+                            });
                         }
                         return 0;
                     },
@@ -276,13 +344,14 @@ function user_imports({ kernel_memory, get_kernel_instance, parent_user_module: 
                 const threadShared = !fresh_memory && parent_memory && memory === parent_memory;
                 const snap = threadShared && memory ? memory.buffer.slice(0, 2 * 1024 * 1024) : null;
                 if (fresh_memory && memory) {
-                    // caller explicitly wants a fresh memory: recreate it
-                    const initial = 12288; // 768 MiB iniziali
-                    const maximum = 32768; // 2 GiB tetto
+                    // Z1-F11-C4-D: reduce initial memory for light guests to avoid OOM.
+                    const isHeavy = module.byteLength > 100 * 1024;
+                    const initial = isHeavy ? 12288 : 1024; // 768MiB vs 64MiB
+                    const maximum = 32768; // 2 GiB
                     memory = new WebAssembly.Memory({ initial, maximum, shared: true });
                     if (d1TraceEnabled) {
                         d1TraceBuffer.recordLifecycle("wasm_memory_constructed", d1RunId, {
-                            detail: `initial=${initial} maximum=${maximum}`,
+                            detail: `initial=${initial} maximum=${maximum} moduleBytes=${module.byteLength}`,
                         });
                     }
                 }
@@ -521,7 +590,7 @@ self.onmessage = (event) => {
         }
         if (data.type === "user_task_error") {
             if (authorityHandlers)
-                authorityHandlers.userTaskError(data.taskToken, data.reason, data.faultClass);
+                authorityHandlers.userTaskError(data.taskToken, data.reason, data.stack ?? "", data.faultClass);
             else
                 postK5Diag("USER_TASK_ERROR_UNBOUND", false, { taskToken: data.taskToken, reason: data.reason });
             return;
@@ -529,7 +598,7 @@ self.onmessage = (event) => {
         postK5Diag("FATAL", false, { code: "UNKNOWN_WORKER_MESSAGE", msgType: data.type });
         return;
     }
-    const { fn, arg, memory, parent_user_module, parent_user_memory, parent_tls_base, brokerSab, workerId, mode, taskToken, forkPid, argv: spawnedArgv } = data;
+    const { fn, arg, memory, parent_user_module, parent_user_memory, parent_tls_base, brokerSab, workerId, mode, taskToken, forkPid, argv: spawnedArgv, argvLen: spawnedArgvLen } = data;
     // K4 DIAG: outer synchronous exception boundary
     let currentStage = "INIT_RECEIVED";
     try {
@@ -552,6 +621,8 @@ self.onmessage = (event) => {
                 throw new Error("[K5A] kernel authority worker missing kernelModule");
             }
             const devicetree = data.devicetree;
+            const z1ScratchAddr = data.z1ScratchAddr ?? 0;
+            const z1ScratchSize = data.z1ScratchSize ?? 0;
             const initramfs = data.initramfs;
             const wasmJspi = WebAssembly;
             if (typeof wasmJspi.Suspending !== "function" ||
@@ -1004,6 +1075,26 @@ self.onmessage = (event) => {
                 kickIdle("syscall_complete");
             };
             // ---- broker pump: registry-bound dispatch --------------------------
+            // Z1-F11-C4-D diag: last syscall numbers per task token (trap context).
+            const lastSyscalls = new Map();
+            // Guest pointer → C string from a task's linear memory (diag only).
+            // Path pointers live in the SYSCALLING task's user memory, which for
+            // K5 tasks is a distinct WebAssembly.Memory from the kernel image —
+            // fall back to kernel memory only when the task has none.
+            const readGuestCString = (mem, addr, max = 96) => {
+                try {
+                    const view = new Uint8Array((mem ?? memory).buffer);
+                    if (!addr || addr >= view.length)
+                        return "";
+                    let end = addr;
+                    while (end < addr + max && end < view.length && view[end] !== 0)
+                        end++;
+                    return new TextDecoder().decode(view.subarray(addr, end));
+                }
+                catch {
+                    return "";
+                }
+            };
             /** Transport-level rejection for requests with no live registry-bound
              * task: distinct from a fabricated Linux return; the syscall never ran. */
             const rejectStaleRequest = (slot) => {
@@ -1074,12 +1165,46 @@ self.onmessage = (event) => {
                                 nr,
                             });
                             dispatched = true;
+                            // Z1-F11-C4-D diag: per-token syscall ring + openat path capture.
+                            {
+                                const ring = lastSyscalls.get(boundToken) ?? [];
+                                ring.push(nr);
+                                if (ring.length > 4)
+                                    ring.shift();
+                                lastSyscalls.set(boundToken, ring);
+                            }
                             postK5Diag("BROKER_DISPATCH", true, {
                                 slot: s,
                                 dispatchId,
                                 taskToken: boundToken,
                                 nr,
                             });
+                            if (nr === 56 /* openat */ || nr === 221 /* execve */) {
+                                const umem = tasks.get(boundToken)?.userMemory ?? null;
+                                const hexAt = (mem, addr) => {
+                                    try {
+                                        if (!mem || !addr)
+                                            return "";
+                                        const v = new Uint8Array(mem.buffer);
+                                        if (addr >= v.length)
+                                            return "oob";
+                                        return Array.from(v.subarray(addr, Math.min(addr + 16, v.length)))
+                                            .map((x) => x.toString(16).padStart(2, "0"))
+                                            .join("");
+                                    }
+                                    catch {
+                                        return "err";
+                                    }
+                                };
+                                postK5Diag(nr === 56 ? "Z1_OPENAT_PATH" : "Z1_EXECVE_PATH", true, {
+                                    taskToken: boundToken,
+                                    dispatchId,
+                                    args: `${a0},${a1},${a2}`,
+                                    path: readGuestCString(umem, nr === 56 ? a1 : a0),
+                                    userHex: hexAt(umem, nr === 56 ? a1 : a0),
+                                    kernHex: hexAt(memory, nr === 56 ? a1 : a0),
+                                });
+                            }
                             // Launched, not awaited: the bridge may park (parent waits while
                             // the child runs) — multiple parked stacks, one executing at a
                             // time, exactly the shared C ABI model. During execution C
@@ -1164,19 +1289,31 @@ self.onmessage = (event) => {
                     // result buffers (magic/pid words) directly through this object.
                     userMemory: t.userMemory,
                 });
-                postMessage({
-                    type: "spawn_worker",
-                    fn: t.guestFn,
-                    arg: t.guestArg,
-                    name: t.name,
-                    user_module: t.userModule,
-                    user_memory: t.userMemory,
-                    taskToken: t.token,
-                    workerId,
-                    mode: t.entryMode,
-                    forkPid: t.forkPid !== 0 ? t.forkPid : undefined,
-                    argv: t.argv ?? undefined,
-                });
+                // Z1-F11-S1: defer the spawn message until the exec-time argv
+                // capture resolves. The kernel does not wait for the worker (spawn
+                // is already asynchronous), so deferring here only enforces the
+                // capture→spawn ordering; without it the worker receives a null
+                // argv and busybox falls back to interactive (observed race).
+                const sendSpawn = () => {
+                    postMessage({
+                        type: "spawn_worker",
+                        fn: t.guestFn,
+                        arg: t.guestArg,
+                        name: t.name,
+                        user_module: t.userModule,
+                        user_memory: t.userMemory,
+                        taskToken: t.token,
+                        workerId,
+                        mode: t.entryMode,
+                        forkPid: t.forkPid !== 0 ? t.forkPid : undefined,
+                        argv: t.argv ?? undefined,
+                        argvLen: t.argvLen ?? undefined,
+                    });
+                };
+                if (t.argvReady && !t.argv)
+                    void t.argvReady.then(sendSpawn, sendSpawn);
+                else
+                    sendSpawn();
             };
             const handlers = {
                 ping() {
@@ -1247,7 +1384,7 @@ self.onmessage = (event) => {
                         });
                     }
                 },
-                userTaskError(taskToken, reason, faultClass) {
+                userTaskError(taskToken, reason, stack, faultClass) {
                     const t = tasks.get(taskToken);
                     if (!t?.pendingCall) {
                         postK5Diag("USER_TASK_ERROR_UNBOUND", false, { taskToken, reason, faultClass });
@@ -1282,6 +1419,8 @@ self.onmessage = (event) => {
                     postK5Diag(faultClass === "wasm_trap" ? "CHILD_WASM_TRAP_CAUGHT" : "USER_IMAGE_RETURNED", true, {
                         taskToken,
                         reason: reason.slice(0, 120),
+                        stack: String(stack ?? "").slice(0, 600),
+                        lastSyscalls: (lastSyscalls.get(taskToken) ?? []).join(","),
                     });
                     pc.resolve(faultClass === "wasm_trap" ? 1 : 0);
                 },
@@ -1482,7 +1621,7 @@ self.onmessage = (event) => {
                     },
                     get_user_module: () => currentTask().userModule,
                     get_user_memory: () => currentTask().userMemory,
-                    process_event_handler(event_kind, _run_id_hi, _run_id_lo, _event_seq, pid, _tgid, _ppid, _worker_id, data0, _data1, _comm) {
+                    process_event_handler(event_kind, _run_id_hi, _run_id_lo, _event_seq, pid, _tgid, _ppid, _worker_id, data0, data1, _comm) {
                         // Z1-GABI: derive authoritative image identity from WASM_EXEC_COMMITTED (kind 2).
                         // Events carry kernel pids; task records are keyed by tokens —
                         // resolve through the pidToToken map learned at completions.
@@ -1497,9 +1636,75 @@ self.onmessage = (event) => {
                             if (t) {
                                 t.imageId = data0;
                                 postK5Diag("Z1_GABI_IMAGE_BOUND", true, { taskToken: t.token, pid, imageId: data0.toString(16) });
+                                // Z1-F11 (KWA-v2.1): Capture kernel-owned argv snapshot via
+                                // non-destructive sys_z1_snapshot_args (NR 247). Allocates a
+                                // temporary 1MB buffer in kernel memory, invokes the syscall
+                                // through the broker, then copies the compact layout into a
+                                // host-side ArrayBuffer bound to TaskRecord.argv. The secondary
+                                // worker receives this via spawn_worker and repacks to binfmt.
+                                // Z1-F11-S1: snapshot the exec'd child's argv via NR 247 into
+                                // the RESERVED authority scratch region (index.ts carves the
+                                // top 1MB of RAM out of the devicetree; the kernel's memblock
+                                // never allocates it, so any linear address in it is safe for
+                                // the kernel's flat-space copy_to_user). Converted to
+                                // space-joined text so the secondary worker's local text path
+                                // decodes it directly. ponytail: args containing spaces merge;
+                                // upgrade path: forward the compact layout instead.
+                                const snapBufPtr = z1ScratchAddr;
+                                const SNAP_BUF_SIZE = z1ScratchSize;
+                                const kExports = instance.exports;
+                                // Z1-F11-S1: token-addressed RAW args read (z1_read_args_raw,
+                                // binfmt_wasm.c) — verbatim memcpy of the exec'd task's
+                                // wasm_process_args block into the RESERVED scratch region.
+                                // Pure read export (kwa_get_last_* precedent): safe to call
+                                // synchronously from JS while other continuations are parked.
+                                // The earlier NR 247 attempt corrupted the exec continuation
+                                // (kmalloc+copy_to_user inside exec-commit -> user.write trap).
+                                // Z1-F11-S1 (C3-D): SYNCHRONOUS argv capture. The kernel now
+                                // passes the exec'd task's wasm_process_args block pointer in
+                                // data1 (binfmt_wasm.c exec-commit event). Pure JS reads from
+                                // linear memory — no wasm re-entry, no async window: t.argv is
+                                // ready BEFORE the user worker spawn / get_args can run.
+                                {
+                                    const argsPtr = Number(data1);
+                                    if (argsPtr !== 0) {
+                                        try {
+                                            const dv = new DataView(memory.buffer);
+                                            const argc = dv.getInt32(argsPtr + 8, true);
+                                            const argvTable = dv.getUint32(argsPtr + 12, true);
+                                            const u8 = new Uint8Array(memory.buffer);
+                                            const parts = [];
+                                            for (let i = 0; i < argc; i++) {
+                                                const strPtr = dv.getUint32(argvTable + i * 4, true);
+                                                let slen = 0;
+                                                while (strPtr + slen < u8.length && u8[strPtr + slen] !== 0)
+                                                    slen++;
+                                                const tmp = new Uint8Array(slen);
+                                                tmp.set(u8.subarray(strPtr, strPtr + slen));
+                                                parts.push(new TextDecoder().decode(tmp));
+                                            }
+                                            // NO trailing newline: hush's argv[1] must be the exact
+                                            // script path, not "...\n" (open() would fail and hush
+                                            // would fall back to interactive stdin).
+                                            const text = parts.join(" ") + "\0";
+                                            const bytes = new TextEncoder().encode(text);
+                                            t.argv = bytes;
+                                            t.argvLen = bytes.byteLength;
+                                            postK5Diag("Z1_F11_ARGV_CAPTURE", true, {
+                                                taskToken: t.token, pid, argc, bytes: bytes.byteLength,
+                                                argv0: parts[0] ?? null,
+                                            });
+                                        }
+                                        catch (e) {
+                                            postK5Diag("Z1_F11_ARGV_CAPTURE", false, {
+                                                taskToken: t.token, pid, error: String(e?.message ?? e).slice(0, 120),
+                                            });
+                                        }
+                                    }
+                                }
                             }
                         }
-                        // NOTE: NO early return — the bridge falls through to the worker
+                        // NOTE: NO early return// NOTE: NO early return — the bridge falls through to the worker
                         // forward path so main-thread event observers (witness rawEvents,
                         // TASK_DEAD checks, monotonicity) keep receiving every event.
                     },
@@ -1522,12 +1727,22 @@ self.onmessage = (event) => {
                             throw new Error("[K5] user.instantiate before user.compile");
                         }
                         if (fresh_memory || !t.userMemory) {
-                            // Fresh VAS: exec commits a new image; keep the long-standing
-                            // 768MiB floor (blink heap) — guests declaring smaller minimums
-                            // accept larger memories up to their 2GiB maximum.
+                            // Z1-F11-C4-D: reduce initial memory for light guests to avoid
+                            // renderer OOM at ~30s during multi-process exec chains.
+                            // Keep 768MiB floor only for heavy guests (blink/node).
+                            let isHeavy = false;
+                            if (t.argv && t.argv.byteLength > 0) {
+                                const text = new TextDecoder().decode(t.argv.slice(0, Math.min(t.argv.byteLength, 256)));
+                                const firstArg = text.split(" ")[0] || "";
+                                isHeavy =
+                                    firstArg.includes("/bin/blink") ||
+                                        firstArg.includes("/bin/node");
+                            }
+                            const initial = isHeavy ? 12288 : 1024; // 768MiB vs 64MiB
+                            const maximum = 32768; // 2 GiB
                             t.userMemory = new WebAssembly.Memory({
-                                initial: 12288,
-                                maximum: 32768,
+                                initial,
+                                maximum,
                                 shared: true,
                             });
                             // A REAL exec never returns into the old image's entry context:
@@ -1649,8 +1864,13 @@ self.onmessage = (event) => {
                             config_len,
                         ]);
                     },
-                    enable_vring: (dev, vq, size, desc_addr) => {
-                        void virtioCall(dev, "enable_vring", [vq, size, desc_addr]);
+                    enable_vring: (dev, vq, size, desc_addr, dev_evt_addr) => {
+                        void virtioCall(dev, "enable_vring", [
+                            vq,
+                            size,
+                            desc_addr,
+                            dev_evt_addr,
+                        ]);
                     },
                     disable_vring: (dev, vq) => {
                         void virtioCall(dev, "disable_vring", [vq]);
@@ -1665,6 +1885,50 @@ self.onmessage = (event) => {
             currentStage = "BEFORE_ENTRYPOINT";
             instance = new WebAssembly.Instance(kernelModule, authorityImports);
             postK5Diag("KERNEL_INSTANTIATED", true, { instanceCount: 1 });
+            // Z1-F11-C3-A: dump the kernel lock-event ring buffer twice post-boot
+            // (before the runtime's 60s shell-prompt timeout closes the page).
+            // Pure-read exports (kwa_get_last_* precedent) — no kernel re-entry.
+            const z1DumpLockDiag = (tag) => {
+                try {
+                    const kx = instance.exports;
+                    if (!kx.z1_ldiag_ptr || !kx.z1_ldiag_count || !kx.z1_ldiag_words) {
+                        postK5Diag("Z1_LDIAG_DUMP", false, { tag, reason: "missing exports" });
+                        return;
+                    }
+                    const ptr = kx.z1_ldiag_ptr();
+                    const count = kx.z1_ldiag_count();
+                    const words = kx.z1_ldiag_words();
+                    const dv = new DataView(memory.buffer);
+                    const u8 = new Uint8Array(memory.buffer);
+                    const N = 96;
+                    const start = 0; /* C3-A rev3: EARLY events (exit/exec) — the tail
+                       fills with panic console output after init death. */
+                    const end = Math.min(count, start + N);
+                    const chunks = [];
+                    for (let i = start; i < end; i++) {
+                        const slot = i % 256;
+                        const base = ptr + slot * words * 4;
+                        let hex = "";
+                        for (let w = 0; w < words; w++) {
+                            const v = dv.getUint32(base + w * 4, true);
+                            hex += v.toString(16).padStart(8, "0");
+                        }
+                        // copy bytes to a plain buffer for the hex encode (SAB-safe path
+                        // is unnecessary here — toString on numbers only)
+                        chunks.push(hex);
+                    }
+                    postK5Diag("Z1_LDIAG_DUMP", true, {
+                        tag, count, ptr, words, first: start, chunks: chunks.join("."),
+                    });
+                }
+                catch (e) {
+                    postK5Diag("Z1_LDIAG_DUMP", false, {
+                        tag, error: String(e?.message ?? e).slice(0, 120),
+                    });
+                }
+            };
+            setTimeout(() => z1DumpLockDiag("t40"), 40_000);
+            setTimeout(() => z1DumpLockDiag("t58"), 58_000);
             // K5 per-task syscall bridge — REQUIRED. The naked syscall export stays
             // untouched for standalone K1/K2/K4 witnesses, but the authority never
             // invokes it: every brokered syscall runs under real task binding.
@@ -1740,7 +2004,7 @@ self.onmessage = (event) => {
             brokerSab,
             workerId,
             taskToken,
-            tasksMap: spawnedArgv && taskToken ? new Map([[taskToken, { argv: spawnedArgv }]]) : undefined,
+            tasksMap: taskToken ? new Map([[taskToken, { argv: spawnedArgv ?? null, argvLen: spawnedArgvLen }]]) : undefined,
         });
         currentStage = "AFTER_USER_IMPORTS";
         postK4Diag("AFTER_USER_IMPORTS", { hasUserImports: !!user.imports, hasModule: !!user.module, hasMemory: !!user.memory });
@@ -1998,6 +2262,9 @@ self.onmessage = (event) => {
                             type: "user_task_error",
                             taskToken,
                             reason: String(entryError?.message ?? entryError).slice(0, 300),
+                            // Z1-F11-C3: wasm frames ("wasm-function[N]:0xoff") locate the
+                            // exact blink function that trapped — the structural-fix target.
+                            stack: String(entryError?.stack ?? "").slice(0, 800),
                             faultClass: isGuestTrap ? "wasm_trap" : "returned_without_exit",
                         });
                         delivered = true;

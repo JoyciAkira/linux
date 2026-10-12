@@ -7,6 +7,7 @@
 #include <linux/ptrace.h>
 #include <linux/syscalls.h>
 #include <asm/process_events.h>
+#include <asm/globals.h>
 
 static int load_wasm_binary(struct linux_binprm *bprm);
 
@@ -87,6 +88,32 @@ __attribute__((export_name("get_args_length"))) int get_args_length(void)
 {
 	struct wasm_process_args *args = current_thread_info()->args;
 	return args ? sizeof(*args) + args->len : -EINVAL;
+}
+
+/* Z1-F11-S1: NON-destructive raw argv read for the host authority.
+ * Unlike get_args() (kfree + NULL + pointer rebasing), this copies the
+ * exec'd task's wasm_process_args block VERBATIM into the caller's buffer
+ * (the reserved authority scratch region — flat-space memcpy, no
+ * copy_to_user, no allocation, no sleeping). Safe to call synchronously
+ * from JS while other continuations are parked: pure read, no kernel
+ * stacks touched. Token-addressed so it never depends on `current`. */
+__attribute__((export_name("z1_read_args_raw"))) int
+z1_read_args_raw(u32 token, void *buf, int len)
+{
+	struct kwa_task_slot *slot = kwa_task_lookup(token);
+	struct wasm_process_args *args;
+	size_t total;
+
+	if (!slot || !slot->task)
+		return -EINVAL;
+	args = task_thread_info(slot->task)->args;
+	if (!args)
+		return -EINVAL;
+	total = sizeof(*args) + args->len;
+	if (len < 0 || (size_t)len < total)
+		return -ENOBUFS;
+	memcpy(buf, args, total);
+	return (int)total;
 }
 
 __attribute__((export_name("get_args"))) int get_args(void *buf)
@@ -182,7 +209,7 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 			current->parent->pid,
 			0, /* worker_id: unused for exec event */
 			((u64)seq << 32) | (u32)current->pid, /* data0: image identity */
-			0, /* data1: reserved */
+			(u64)(uintptr_t)current_thread_info()->args, /* data1: args block ptr (Z1-F11-S1) */
 			current->comm,
 			strnlen(current->comm, sizeof(current->comm))
 		);

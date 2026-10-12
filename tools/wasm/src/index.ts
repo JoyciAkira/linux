@@ -14,6 +14,7 @@ import {
   type RawProcessEventMessage,
 } from "./process-events.ts";
 import { createBrokerSab } from "./kwa-broker.ts";
+console.log("[R2-MODULE] index.js evaluated", import.meta.url);
 export {
   BlockDevice,
   type BlockDeviceStorage,
@@ -83,6 +84,12 @@ const resources = (async () => {
 })();
 
 const INITCPIO_ADDR = 0x200000;
+/* Z1-F11-S1: authority scratch region, carved from the TOP of RAM and
+ * reserved in the devicetree so the kernel's memblock never allocates it.
+ * The authority uses it as the NR 247 argv-snapshot buffer (the kernel's
+ * copy_to_user is a flat-space memcpy — any linear address works; the only
+ * missing piece was a buffer the kernel would not hand out). */
+const Z1_SCRATCH_SIZE = 0x100000;
 
 export interface D1TraceMetadata {
   capacity: number;
@@ -308,6 +315,11 @@ export class Machine extends EventEmitter<{
 
   async boot() {
     const memory_reservations: { address: number; size: number }[] = [];
+    const totalBytes = this.#memory.buffer.byteLength;
+    memory_reservations.push({
+      address: totalBytes - Z1_SCRATCH_SIZE,
+      size: Z1_SCRATCH_SIZE,
+    });
     if (this.#initcpio) {
       memory_reservations.push({
         address: INITCPIO_ADDR,
@@ -328,7 +340,11 @@ export class Machine extends EventEmitter<{
       });
     };
     const boot_console_close = () => {
-      this.#boot_console_writer.close();
+      // Z1-F11: do NOT close the writer. The kernel fires this when the
+      // CON_BOOT earlycon unregisters at the hvc0 handover, but the same
+      // channel carries post-handover diagnostics (z1_boot_diag) for the
+      // whole session. The reader loop in RealLinuxRuntime simply never
+      // sees done, which is harmless — #bootLog keeps accumulating.
     };
 
     let authorityWorker: Worker | null = null;
@@ -355,6 +371,7 @@ export class Machine extends EventEmitter<{
               event.data.mode,
               event.data.forkPid,
               event.data.argv,
+              event.data.argvLen,
             );
             break;
           case "boot_console_write":
@@ -385,6 +402,17 @@ export class Machine extends EventEmitter<{
             if (decoded !== null) this.emit("d1_trace", decoded);
             break;
           }
+          case "r1b_provenance":
+            // R1-B: Surface ConsoleDevice constructor provenance from main thread.
+            // Captures actual runtime class identity without hot-path console.log.
+            this.emit("authority_diag", {
+              type: "authority_diag",
+              stage: "R1B_CONSOLE_PROVENANCE",
+              ok: true,
+              detail: event.data,
+              ts: performance.now(),
+            });
+            break;
           case "worker_done": {
             const idx = this.#workers.indexOf(worker);
             if (idx !== -1) {
@@ -464,6 +492,7 @@ export class Machine extends EventEmitter<{
                   vq: number,
                   size: number,
                   desc_addr: number,
+                  dev_evt_addr: number,
                 ): void;
                 disable_vring(dev: number, vq: number): void;
                 notify(dev: number, vq: number): void;
@@ -481,7 +510,13 @@ export class Machine extends EventEmitter<{
                   args[4]!,
                 );
               } else if (op === "enable_vring") {
-                callVirtio.enable_vring(dev, args[0]!, args[1]!, args[2]!);
+                callVirtio.enable_vring(
+                  dev,
+                  args[0]!,
+                  args[1]!,
+                  args[2]!,
+                  args[3]!,
+                );
               } else if (op === "disable_vring") {
                 callVirtio.disable_vring(dev, args[0]!);
               } else {
@@ -538,6 +573,7 @@ export class Machine extends EventEmitter<{
       mode?: InitMessage["mode"],
       forkPid?: number,
       argv?: Uint8Array | null,
+      argvLen?: number,
     ) => {
       console.log(
         `[SPW] fn=${fn} name=${name} umodule=${typeof user_module}:${String(user_module).slice(0, 40)} umem=${typeof user_memory}:${String(user_memory)} taskToken=${taskToken} mode=${mode}`,
@@ -565,6 +601,7 @@ export class Machine extends EventEmitter<{
           mode,
           forkPid,
           argv,
+          argvLen,
           d1TraceEnabled: this.#d1_trace_enabled,
           d1RunId: this.#d1_run_id,
         } satisfies InitMessage,
@@ -609,6 +646,8 @@ export class Machine extends EventEmitter<{
         workerId: 1,
         d1TraceEnabled: this.#d1_trace_enabled,
         d1RunId: this.#d1_run_id,
+        z1ScratchAddr: this.#memory.buffer.byteLength - Z1_SCRATCH_SIZE,
+        z1ScratchSize: Z1_SCRATCH_SIZE,
       } satisfies InitMessage,
     );
   }

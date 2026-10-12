@@ -477,6 +477,7 @@ static void lookahead_bufs(struct tty_port *port, struct tty_buffer *head)
 		 * ensures commit value read is not stale if the head
 		 * is advancing to the next buffer.
 		 */
+		pr_info("Z1h %d\n", head != NULL);
 		next = smp_load_acquire(&head->next);
 		/*
 		 * Paired w/ release in __tty_buffer_request_room() or in
@@ -513,6 +514,7 @@ receive_buf(struct tty_port *port, struct tty_buffer *head, int count)
 		f = flag_buf_ptr(head, head->read);
 
 	n = port->client_ops->receive_buf(port, p, f, count);
+	pr_info("Z1q %d %d\n", count, n);
 	if (n > 0)
 		memset(p, 0, n);
 	return n;
@@ -534,6 +536,8 @@ static void flush_to_ldisc(struct work_struct *work)
 	struct tty_port *port = container_of(work, struct tty_port, buf.work);
 	struct tty_bufhead *buf = &port->buf;
 
+	pr_info("Z1f\n");
+	pr_info("Z1y %d\n", atomic_read(&buf->priority));
 	mutex_lock(&buf->lock);
 
 	while (1) {
@@ -554,6 +558,7 @@ static void flush_to_ldisc(struct work_struct *work)
 		 * tty_buffer_flush(); ensures we see the committed buffer data
 		 */
 		count = smp_load_acquire(&head->commit) - head->read;
+		pr_info("Z1c %d\n", count);
 		if (!count) {
 			if (next == NULL)
 				break;
@@ -563,6 +568,7 @@ static void flush_to_ldisc(struct work_struct *work)
 		}
 
 		rcvd = receive_buf(port, head, count);
+		pr_info("Z1r %d %d\n", count, rcvd);
 		head->read += rcvd;
 		if (rcvd < count)
 			lookahead_bufs(port, head);
@@ -583,6 +589,7 @@ static inline void tty_flip_buffer_commit(struct tty_buffer *tail)
 	 * Paired w/ acquire in flush_to_ldisc(); ensures flush_to_ldisc() sees
 	 * buffer data.
 	 */
+	pr_info("Z1m %d\n", tail->used);
 	smp_store_release(&tail->commit, tail->used);
 }
 
@@ -601,7 +608,13 @@ void tty_flip_buffer_push(struct tty_port *port)
 	struct tty_bufhead *buf = &port->buf;
 
 	tty_flip_buffer_commit(buf->tail);
-	queue_work(system_unbound_wq, &buf->work);
+	pr_info("Z1P\n");
+	/* Z1-F12-R4: the wasm port never initializes the workqueue
+	 * subsystem (system_unbound_wq stays NULL), so queue_work() is a
+	 * no-op and RX input would die in the flip buffer. Run the ldisc
+	 * flush synchronously — same tradeoff virtio_wasm.c makes for
+	 * its device setup ("Synchronous setup guarantees..."). */
+	flush_to_ldisc(&buf->work);
 }
 EXPORT_SYMBOL(tty_flip_buffer_push);
 

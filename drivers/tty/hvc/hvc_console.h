@@ -95,6 +95,12 @@ static inline void hvc_resize(struct hvc_struct *hp, struct winsize ws)
 	spin_unlock_irqrestore(&hp->lock, flags);
 }
 
+/* Z1-F11-C: TX-completion wakeup for console writers. Called by
+ * virtio_console out_intr when the host recycles TX buffers; mirrors the
+ * do_wakeup/tty_wakeup pair in hvc_poll so blocked writev callers drain
+ * without waiting for an unrelated RX poll. */
+void hvc_console_tx_wakeup(struct hvc_struct *hp);
+
 /* default notifier for irq based notification */
 extern int notifier_add_irq(struct hvc_struct *hp, int data);
 extern void notifier_del_irq(struct hvc_struct *hp, int data);

@@ -845,8 +845,11 @@ static void synchronize_group_exit(struct task_struct *tsk, long code)
 	spin_unlock_irq(&sighand->siglock);
 }
 
+void z1_llog(u32 type, u32 lock_id, u32 site, u32 token, u32 data);
+
 void __noreturn do_exit(long code)
 {
+	z1_llog(9, 0, 12, kwa_task_token(current), (u32)(code & 0xffffffffu));
 	pr_err("G12-DIAG: do_exit entry pid=%d tgid=%d code=%lx exit_state=%x comm=%s\n",
 	       current->pid, current->tgid, code, current->exit_state, current->comm);
 
@@ -1851,8 +1854,10 @@ long kernel_wait4(pid_t upid, int __user *stat_addr, int options,
 	wo.wo_rusage	= ru;
 	ret = do_wait(&wo);
 	put_pid(pid);
-	if (ret > 0 && stat_addr && put_user(wo.wo_stat, stat_addr))
+	if (ret > 0 && stat_addr && put_user(wo.wo_stat, stat_addr)) {
+		z1_llog(10, 0, 13, kwa_task_token(current), (u32)wo.wo_stat);
 		ret = -EFAULT;
+	}
 
 	return ret;
 }

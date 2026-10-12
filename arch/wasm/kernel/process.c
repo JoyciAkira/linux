@@ -257,5 +257,14 @@ int copy_thread(struct task_struct *p, const struct kernel_clone_args *args)
 				 kwa_task_token(p),
 				 0);
 
+	/* Z1-F11: TLS inheritance. Fork children continue the parent's user
+	 * state and musl dereferences TLS on every exit (__exit_lock at
+	 * tp+24) — a zero tp_value made every forked child die with wasm
+	 * unreachable BEFORE the exit_group dispatch (parent reaped SIGSEGV).
+	 * CLONE_SETTLS callers pass the explicit tls; plain fork inherits
+	 * the parent's tp. Kernel threads ignore it harmlessly. */
+	task_thread_info(p)->tp_value = args->tls ?
+		args->tls : task_thread_info(current)->tp_value;
+
 	return 0;
 }

@@ -2101,10 +2101,19 @@ static inline int _cond_resched(void) { return 0; }
 
 #endif /* !defined(CONFIG_PREEMPTION) || defined(CONFIG_PREEMPT_DYNAMIC) */
 
+#ifdef CONFIG_WASM
+/* Z1-F11-C: cooperative uniprocessor port. cond_resched() is an advisory
+ * preemption hint; yielding inside a broker-served syscall here parks the
+ * syscall continuation where nothing re-queues it (observed: hvc writev
+ * hang after a partial write + cond_resched mid-loop). Real blocking waits
+ * keep their own wait_event/schedule semantics — only the hint is a no-op. */
+#define cond_resched() do { } while (0)
+#else
 #define cond_resched() ({			\
 	__might_resched(__FILE__, __LINE__, 0);	\
 	_cond_resched();			\
 })
+#endif
 
 extern int __cond_resched_lock(spinlock_t *lock);
 extern int __cond_resched_rwlock_read(rwlock_t *lock);

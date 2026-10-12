@@ -52,6 +52,7 @@ class Chain {
         if (queue.used_idx >= queue.size) {
             queue.used_idx -= queue.size;
             queue.used_wrap = !queue.used_wrap;
+            queue.publish_device_event();
         }
     }
     *[Symbol.iterator]() {
@@ -71,12 +72,26 @@ class Virtqueue {
     used_wrap = true;
     used_idx = 0;
     avail_idx = 0;
-    constructor(mem, size, desc_addr) {
+    #dev_evt_addr = 0;
+    constructor(mem, size, desc_addr, dev_evt_addr) {
         assert(size !== 0);
         assert(mem.byteOffset === 0);
         this.#mem = mem;
         this.size = size;
         this.desc = FixedArray(VirtqDescriptor, size).get(mem, desc_addr);
+        // Z1-F11-C4-D: device-event area address (from the guest, via
+        // enable_vring). Without publishing here the guest's kick_prepare
+        // suppresses notifies after the first avail-wrap flip.
+        this.#dev_evt_addr = dev_evt_addr;
+        if (dev_evt_addr !== 0)
+            this.publish_device_event();
+    }
+    /** Publish { off_wrap (ignored), flags: ENABLE(0) } — always-notify. */
+    publish_device_event() {
+        if (this.#dev_evt_addr === 0)
+            return;
+        const dv = this.#mem;
+        dv.setUint32(this.#dev_evt_addr, 0, true);
     }
     #pop() {
         let i = this.#advance();
@@ -532,16 +547,51 @@ export class BlockDevice extends VirtioDevice {
         this.trigger_interrupt("vring");
     }
 }
+// Z1-F12: virtio_console_config matches Linux UAPI layout.
+// Required by virtcons_probe when VIRTIO_CONSOLE_F_SIZE is negotiated.
+class VirtioConsoleConfig extends Struct({
+    cols: U16LE,
+    rows: U16LE,
+    max_nr_ports: U32LE,
+    emerg_wr: U32LE,
+}) {
+}
 export class ConsoleDevice extends VirtioDevice {
     ID = 3;
-    config_bytes = new Uint8Array(0);
-    config = new EmptyStruct(this.config_bytes);
+    config_bytes = new Uint8Array(VirtioConsoleConfig.size);
+    config = new VirtioConsoleConfig(this.config_bytes);
+    // Z1-F12: Advertise VIRTIO_CONSOLE_F_SIZE (bit 0) so virtcons_probe
+    // reads config space and requests both RX (vq0) and TX (vq1) queues.
+    features = TransportFeatures.VERSION_1 |
+        TransportFeatures.RING_PACKED |
+        TransportFeatures.INDIRECT_DESC |
+        (1n << 0n);
     #input;
     #output;
     constructor(input, output) {
         super();
         this.#input = input;
         this.#output = output.getWriter();
+        // Z1-F12: Set default console size so virtcons_probe config read succeeds.
+        this.config.cols = 80;
+        this.config.rows = 25;
+        this.config.max_nr_ports = 1;
+        this.config.emerg_wr = 0;
+        // R1-B: Safe provenance diagnostic via postMessage (not console.log,
+        // which causes AUTHORITY_HALT_BLOCKED in JSPI continuations).
+        // Fires once at construction to capture actual runtime class identity.
+        try {
+            postMessage({
+                type: "r1b_provenance",
+                className: "ConsoleDevice",
+                id: this.ID,
+                features: String(this.features),
+                configBytes: this.config_bytes?.byteLength,
+                hasVirtioConsoleConfig: this.config instanceof VirtioConsoleConfig,
+                ts: performance.now(),
+            });
+        }
+        catch { /* best-effort */ }
     }
     #writing = null;
     async #writer(queue) {
@@ -565,6 +615,13 @@ export class ConsoleDevice extends VirtioDevice {
                 desc.array.set(chunk.subarray(0, n));
                 chunk = chunk.subarray(n);
                 chain.release(n);
+                // Z1-F11: RX delivery trace. postMessage is a no-op on the main
+                // thread (no window listener), so write the diag line into the
+                // console output stream — it lands in #stdoutBuffer verbatim.
+                try {
+                    await this.#output.write(new TextEncoder().encode(`[z1f11-rx] bytes=${n}\n`));
+                }
+                catch { /* best-effort */ }
             }
             this.trigger_interrupt("vring");
         }
@@ -576,7 +633,14 @@ export class ConsoleDevice extends VirtioDevice {
             case 0:
                 this.#writing ??= this.#writer(queue);
                 break;
-            case 1:
+            case 1: {
+                // Z1-F11: TX drain trace — counts chains/bytes actually pulled per
+                // guest kick. If the hush echo never appears in stdout but TX_DRAIN
+                // reports nonzero bytes, the loss is downstream (stdout capture);
+                // if TX_DRAIN reports 0 chains, the guest never sent the echo —
+                // guest-side TX completion (out_intr) is the broken link.
+                let drained = 0;
+                let bytes = 0;
                 for (const chain of queue) {
                     let n = 0;
                     for (const { array, writable } of chain) {
@@ -585,9 +649,20 @@ export class ConsoleDevice extends VirtioDevice {
                         n += array.byteLength;
                     }
                     chain.release(n);
+                    drained += 1;
+                    bytes += n;
                 }
                 this.trigger_interrupt("vring");
+                // Z1-F11: TX drain trace — chains/bytes actually pulled per guest
+                // kick, written into the console output stream (surfaces in the
+                // streamed boot log, unlike main-thread postMessage which has no
+                // listener).
+                try {
+                    await this.#output.write(new TextEncoder().encode(`[z1f11-tx] chains=${drained} bytes=${bytes}\n`));
+                }
+                catch { /* best-effort */ }
                 break;
+            }
             default:
                 console.error("ConsoleDevice: unknown vq", vq);
         }
@@ -721,18 +796,25 @@ export class NetworkDevice extends VirtioDevice {
         this.trigger_interrupt("vring");
     }
 }
+// Z1-F12-R2: module-scope evaluation marker (fires in ANY importing context)
+console.log("[R2-MODULE] virtio.js evaluated", import.meta.url);
 export function virtio_imports({ memory, devices, ncpus, trigger_irq_for_cpu, }) {
     const dv = new DataView(memory.buffer);
     return {
         set_features(dev, features) {
             const device = devices[dev];
             assert(device);
+            // Z1-F12-R2: Main-thread provenance — this path provably executes
+            // (Z1VIRTIO CMD_POSTED events) and console.log here reaches the
+            // driver capture (same as "[Z1F11] console RX read"). Logs the LIVE
+            // instance identity to separate "stale class" from "negotiation loss".
+            console.log(`[Z1-F12-R2] set_features dev=${dev} id=${device.ID} liveFeatures=0x${device.features.toString(16)} negotiated=0x${features.toString(16)} ctor=${device.constructor?.name}`);
             assert(device.features === features, "the kernel should accept every feature we offer, and no more");
         },
-        enable_vring(dev, vq, size, desc_addr) {
+        enable_vring(dev, vq, size, desc_addr, dev_evt_addr) {
             const device = devices[dev];
             assert(device);
-            device.enable(vq, new Virtqueue(dv, size, desc_addr));
+            device.enable(vq, new Virtqueue(dv, size, desc_addr, dev_evt_addr ?? 0));
         },
         disable_vring(dev, vq) {
             const device = devices[dev];

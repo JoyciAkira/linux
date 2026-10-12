@@ -19,6 +19,9 @@ export interface InitMessage {
      * initramfs must fit its static initramfs buffer (setup.c bound 512). */
     bootViaExport?: boolean;
     devicetree?: Uint8Array;
+    /** Z1-F11-S1: reserved authority scratch region for NR 247 snapshots. */
+    z1ScratchAddr?: number;
+    z1ScratchSize?: number;
     initramfs?: Uint8Array | null;
     /** K5: KERNEL-OWNED task token this user worker executes for. Sent with
      * every broker request as the routing key (kernel truth still stamped C-side). */
@@ -30,6 +33,8 @@ export interface InitMessage {
     forkPid?: number;
     /** K4+: Captured argv bytes from authority TaskRecord at spawn time. */
     argv?: Uint8Array | null;
+    /** Z1-F11-S1: kernel-authoritative argv length for exec children. */
+    argvLen?: number;
 }
 export type WorkerMessage = {
     type: "spawn_worker";
@@ -49,6 +54,8 @@ export type WorkerMessage = {
     taskToken?: number;
     mode?: "start" | "switch_entry" | "fork_user";
     forkPid?: number;
+    /** Z1-F11-S1: kernel-authoritative argv length for exec children. */
+    argvLen?: number;
     argv?: Uint8Array | null;
 } | {
     type: "boot_console_write";
@@ -97,6 +104,7 @@ export type WorkerMessage = {
     type: "user_task_error";
     taskToken: number;
     reason: string;
+    stack?: string;
     faultClass: "wasm_trap" | "returned_without_exit";
 }
 /** K5: main → authority: fork ack relay (from a user worker's fork_copied). */
@@ -128,6 +136,14 @@ export type WorkerMessage = {
     type: "authority_broker_kick";
 } | {
     type: "k5a_ping";
+} | {
+    type: "r1b_provenance";
+    className: string;
+    id: number;
+    features: string;
+    configBytes: number;
+    hasVirtioConsoleConfig: boolean;
+    ts: number;
 };
 /** K5: virtio device operations relayed authority→main. */
 export type VirtioOp = "set_features" | "setup" | "enable_vring" | "disable_vring" | "notify";

@@ -1366,6 +1366,7 @@ handle_newline:
 			put_tty_queue(c, ldata);
 			smp_store_release(&ldata->canon_head, ldata->read_head);
 			kill_fasync(&tty->fasync, SIGIO, POLL_IN);
+			pr_info("Z1k\n");
 			wake_up_interruptible_poll(&tty->read_wait, EPOLLIN | EPOLLRDNORM);
 			return;
 		}
@@ -1764,6 +1765,7 @@ static void n_tty_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 static int n_tty_receive_buf2(struct tty_struct *tty, const unsigned char *cp,
 			      const char *fp, int count)
 {
+	pr_info("Z1n %d\n", count);
 	return n_tty_receive_buf_common(tty, cp, fp, count, 1);
 }
 
@@ -2147,6 +2149,7 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file,
 	unsigned char *kb = kbuf;
 	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	int c;
+	pr_info("Z1N %zu\n", nr);
 	int minimum, time;
 	ssize_t retval = 0;
 	long timeout;
@@ -2467,6 +2470,7 @@ static __poll_t n_tty_poll(struct tty_struct *tty, struct file *file,
 			tty_chars_in_buffer(tty) < WAKEUP_CHARS &&
 			tty_write_room(tty) > 0)
 		mask |= EPOLLOUT | EPOLLWRNORM;
+	pr_info("Z1L %x\n", (unsigned)mask);
 	return mask;
 }
 

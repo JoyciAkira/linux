@@ -67,6 +67,9 @@ bool virtqueue_kick_prepare(struct virtqueue *vq);
 
 bool virtqueue_notify(struct virtqueue *vq);
 
+/* Z1-F11-C3-B: guest used-cursor debug helper (virtio_ring.c). */
+u32 virtqueue_debug_used_flags(struct virtqueue *_vq);
+
 void *virtqueue_get_buf(struct virtqueue *vq, unsigned int *len);
 
 void *virtqueue_get_buf_ctx(struct virtqueue *vq, unsigned int *len,
@@ -92,6 +95,7 @@ const struct vring *virtqueue_get_vring(struct virtqueue *vq);
 dma_addr_t virtqueue_get_desc_addr(struct virtqueue *vq);
 dma_addr_t virtqueue_get_avail_addr(struct virtqueue *vq);
 dma_addr_t virtqueue_get_used_addr(struct virtqueue *vq);
+u32 virtqueue_get_dev_evt_addr32(struct virtqueue *vq);
 
 int virtqueue_resize(struct virtqueue *vq, u32 num,
 		     void (*recycle)(struct virtqueue *vq, void *buf));

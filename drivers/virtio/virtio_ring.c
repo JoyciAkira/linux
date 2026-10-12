@@ -1521,6 +1521,8 @@ static bool virtqueue_kick_prepare_packed(struct virtqueue *_vq)
 	 */
 	virtio_mb(vq->weak_barriers);
 
+	void z1_llog(u32 type, u32 lock_id, u32 site, u32 token, u32 data);
+
 	old = vq->packed.next_avail_idx - vq->num_added;
 	new = vq->packed.next_avail_idx;
 	vq->num_added = 0;
@@ -1533,6 +1535,14 @@ static bool virtqueue_kick_prepare_packed(struct virtqueue *_vq)
 
 	if (flags != VRING_PACKED_EVENT_FLAG_DESC) {
 		needs_kick = (flags != VRING_PACKED_EVENT_FLAG_DISABLE);
+		/* Z1-F11-C4-D-1: capture the suppressed-kick state (ring buffer,
+		 * no printk — the TTY path under study). type=8 snapshot, 9
+		 * needs_kick, 11 device ptr, 12 EVENT_IDX negotiation. */
+		z1_llog(8, 0, 9, current->pid, snapshot.u32);
+		z1_llog(9, 0, 9, current->pid, (u32)(needs_kick ? 1 : 0));
+		z1_llog(11, 0, 9, current->pid, (u32)(uintptr_t)vq->packed.vring.device);
+		z1_llog(12, 0, 9, current->pid,
+			virtio_has_feature(vq->vq.vdev, 29 /* VIRTIO_F_RING_EVENT_IDX */) ? 1u : 0u);
 		goto out;
 	}
 
@@ -1544,6 +1554,15 @@ static bool virtqueue_kick_prepare_packed(struct virtqueue *_vq)
 		event_idx -= vq->packed.vring.num;
 
 	needs_kick = vring_need_event(event_idx, new, old);
+	z1_llog(8, 0, 9, current->pid, snapshot.u32);
+	z1_llog(9, 0, 9, current->pid,
+		(u32)((needs_kick ? 1 : 0) | ((event_idx & 0x7fff) << 1) |
+		      ((wrap_counter & 1) << 16)));
+	z1_llog(10, 0, 9, current->pid,
+		((u32)(old & 0xffff)) | ((u32)(new & 0xffff) << 16));
+	z1_llog(11, 0, 9, current->pid, (u32)(uintptr_t)vq->packed.vring.device);
+	z1_llog(12, 0, 9, current->pid,
+		virtio_has_feature(vq->vq.vdev, 29 /* VIRTIO_F_RING_EVENT_IDX */) ? 1u : 0u);
 out:
 	END_USE(vq);
 	return needs_kick;
@@ -1606,6 +1625,17 @@ static inline bool is_used_desc_packed(const struct vring_virtqueue *vq,
 	used = !!(flags & (1 << VRING_PACKED_DESC_F_USED));
 
 	return avail == used && used == used_wrap_counter;
+}
+
+/* Z1-F11-C3-B: guest used-cursor debug — desc flags at last_used (low 16)
+ * plus the raw last_used_idx (high 16), for lock-event ring logging. */
+u32 virtqueue_debug_used_flags(struct virtqueue *_vq)
+{
+	struct vring_virtqueue *vq = to_vvq(_vq);
+	u16 last_used = packed_last_used(vq->last_used_idx);
+	u16 flags = vq->packed.vring.desc[last_used].flags;
+
+	return (u32)flags | ((u32)vq->last_used_idx << 16);
 }
 
 static inline bool more_used_packed(const struct vring_virtqueue *vq)
@@ -2865,6 +2895,19 @@ dma_addr_t virtqueue_get_used_addr(struct virtqueue *_vq)
 		((char *)vq->split.vring.used - (char *)vq->split.vring.desc);
 }
 EXPORT_SYMBOL_GPL(virtqueue_get_used_addr);
+
+/* Z1-F11-C4-D: 32-bit device-event area address for the packed layout
+ * (wasm linear memory); 0 for split rings or when unpublished. The host
+ * uses it to maintain the off_wrap/flags contract. */
+u32 virtqueue_get_dev_evt_addr32(struct virtqueue *_vq)
+{
+	struct vring_virtqueue *vq = to_vvq(_vq);
+
+	if (!vq->packed_ring)
+		return 0;
+	return (u32)vq->packed.device_event_dma_addr;
+}
+EXPORT_SYMBOL_GPL(virtqueue_get_dev_evt_addr32);
 
 /* Only available for split ring */
 const struct vring *virtqueue_get_vring(struct virtqueue *vq)

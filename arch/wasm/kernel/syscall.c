@@ -385,3 +385,164 @@ wasm_get_thread_area(void)
 	struct thread_info *ti = task_thread_info(current);
 	return ti->tp_value;
 }
+
+/* Z1-F11 (KWA-v2.1): Non-destructive argv/envp snapshot for host authority.
+ * Unlike get_args(), this does NOT modify pointers or free the args block.
+ * Writes compact layout [argc@0, envc@4, ptrs@8.., strings] to user buf.
+ * Returns argc on success; -EINVAL if no args; -ENOBUFS if len too small.
+ * Safe to call multiple times; kernel retains ownership of args block. */
+SYSCALL_DEFINE2(z1_snapshot_args, void __user *, buf, size_t, len)
+{
+	struct wasm_process_args *args = current_thread_info()->args;
+	size_t ptrs, strings, total, off;
+	unsigned long *out;
+	int i;
+
+	if (!args)
+		return -EINVAL;
+
+	strings = 0;
+	for (i = 0; i < args->argc; i++)
+		strings += strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+	for (i = 0; i < args->envc; i++)
+		strings += strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+	ptrs = (size_t)(args->argc + args->envc) * sizeof(unsigned long);
+	total = 8 + ptrs + strings;
+	if (len < total)
+		return -ENOBUFS;
+
+	out = kmalloc(total, GFP_KERNEL);
+	if (!out)
+		return -ENOMEM;
+	out[0] = (unsigned long)args->argc;
+	out[1] = (unsigned long)args->envc;
+	off = 8 + ptrs;
+	for (i = 0; i < args->argc; i++) {
+		size_t sl = strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+		out[2 + i] = (unsigned long)buf + off;
+		off += sl;
+	}
+	for (i = 0; i < args->envc; i++) {
+		size_t sl = strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+		out[2 + args->argc + i] = (unsigned long)buf + off;
+		off += sl;
+	}
+	off = 8 + ptrs;
+	for (i = 0; i < args->argc; i++) {
+		size_t sl = strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+		memcpy((char *)out + off, args->argv[i], sl);
+		off += sl;
+	}
+	for (i = 0; i < args->envc; i++) {
+		size_t sl = strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+		memcpy((char *)out + off, args->envp[i], sl);
+		off += sl;
+	}
+
+	if (copy_to_user(buf, out, total)) {
+		kfree(out);
+		return -EFAULT;
+	}
+	kfree(out);
+	return args->argc;
+}
+
+/* Z1-F11-C4-D: no socket subsystem in the wasm kernel. Stubs return the
+ * semantically correct errno (see asm/unistd.h override table) instead of
+ * the generic -ENOSYS from sys_ni_syscall, which guest libc treats as a
+ * fatal kernel-capability failure (musl a_crash → wasm unreachable). */
+SYSCALL_DEFINE3(z1_socket_stub, int, family, int, type, int, protocol)
+{
+	return -EAFNOSUPPORT;
+}
+
+SYSCALL_DEFINE4(z1_socketpair_stub, int, family, int, type, int, protocol,
+		int __user *, sv)
+{
+	return -EAFNOSUPPORT;
+}
+
+SYSCALL_DEFINE5(z1_sockfd_stub, int, fd, unsigned long, a1, unsigned long, a2,
+		unsigned long, a3, unsigned long, a4)
+{
+	return -ENOTSOCK;
+}
+
+/* Z1-F11-C5-5: minimal futex for guest pthreads. The wasm32 musl port spins
+ * in pure CAS loops when futex returns -ENOSYS; the K5 user worker executes
+ * one continuation at a time, so a spinning guest thread starves the lock
+ * holder's kernel task (silent hang). A real FUTEX_WAIT parks the waiter
+ * INSIDE the kernel scheduler, creating the scheduling point that lets the
+ * holder run and release. Keys include the mm identity so exec'd images with
+ * separate user memories never collide. No timeouts yet (Gate scope). */
+struct z1_futex_q {
+	struct task_struct *task;
+	unsigned long key;
+	struct z1_futex_q *next;
+};
+
+static struct z1_futex_q *z1_futex_buckets[16];
+
+static unsigned long z1_futex_key(u32 __user *uaddr)
+{
+	return ((unsigned long)current->mm >> 4) ^ (unsigned long)uaddr;
+}
+
+static void z1_futex_enqueue(struct z1_futex_q *q)
+{
+	unsigned long k = q->key & 15;
+	q->next = z1_futex_buckets[k];
+	z1_futex_buckets[k] = q;
+}
+
+#define FUTEX_WAIT_OP 0
+#define FUTEX_WAKE_OP 1
+#define FUTEX_PRIVATE_FLAG 128
+
+SYSCALL_DEFINE3(z1_futex, u32 __user *, uaddr, int, op, u32, val)
+{
+	int cmd = op & ~FUTEX_PRIVATE_FLAG;
+	unsigned long key = z1_futex_key(uaddr);
+
+	if (cmd == FUTEX_WAIT_OP) {
+		struct z1_futex_q q;
+		u32 cur = 0;
+		struct z1_futex_q *it;
+
+		raw_copy_from_user(&cur, uaddr, sizeof(cur));
+		if (cur != val)
+			return -EAGAIN;
+		for (it = z1_futex_buckets[key & 15]; it; it = it->next)
+			if (it->task == current)
+				return -EINVAL;
+
+		q.task = current;
+		q.key = key;
+		q.next = NULL;
+		z1_futex_enqueue(&q);
+
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule();
+		set_current_state(TASK_RUNNING);
+		return 0;
+	}
+	if (cmd == FUTEX_WAKE_OP) {
+		struct z1_futex_q **pp = &z1_futex_buckets[key & 15];
+		int nwake = (int)val;
+		int woken = 0;
+
+		while (*pp && woken < nwake) {
+			struct z1_futex_q *q = *pp;
+			if (q->key == key) {
+				*pp = q->next;
+				wake_up_process(q->task);
+				woken++;
+				kfree(q);
+				continue;
+			}
+			pp = &q->next;
+		}
+		return woken;
+	}
+	return -ENOSYS;
+}

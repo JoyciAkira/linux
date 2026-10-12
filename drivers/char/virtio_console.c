@@ -26,6 +26,13 @@
 #include <linux/module.h>
 #include <linux/dma-mapping.h>
 #include "../tty/hvc/hvc_console.h"
+#include <asm/globals.h>
+
+/* Z1-F11-C3-A lock-event ring logger (arch/wasm/kernel/z1_lockdiag.c) */
+void z1_llog(u32 type, u32 lock_id, u32 site, u32 token, u32 data);
+u32 z1_lhold(u32 lock_id, u32 token);
+
+
 
 #define is_rproc_enabled IS_ENABLED(CONFIG_REMOTEPROC)
 #define VIRTCONS_MAX_PORTS 0x8000
@@ -479,6 +486,7 @@ static struct port_buffer *get_inbuf(struct port *port)
 		buf->len = min_t(size_t, len, buf->size);
 		buf->offset = 0;
 		port->stats.bytes_received += len;
+		pr_info("Z1b %u\n", (unsigned)buf->len);
 	}
 	return buf;
 }
@@ -614,6 +622,7 @@ static ssize_t __send_to_port(struct port *port, struct scatterlist *sg,
 	out_vq = port->out_vq;
 
 	spin_lock_irqsave(&port->outvq_lock, flags);
+	/* z1_llog(1, 2, 7, kwa_task_token(current), 0); */
 
 	reclaim_consumed_buffers(port);
 
@@ -621,6 +630,7 @@ static ssize_t __send_to_port(struct port *port, struct scatterlist *sg,
 
 	/* Tell Host to go! */
 	virtqueue_kick(out_vq);
+	/* z1_llog(6, 2, 7, kwa_task_token(current), (u32)err); */
 
 	if (err) {
 		in_count = 0;
@@ -642,10 +652,21 @@ static ssize_t __send_to_port(struct port *port, struct scatterlist *sg,
 	 * we need to kmalloc a GFP_ATOMIC buffer each time the
 	 * console driver writes something out.
 	 */
-	while (!virtqueue_get_buf(out_vq, &len)
-		&& !virtqueue_is_broken(out_vq))
-		cpu_relax();
+	{
+		unsigned long spins = 0;
+		while (!virtqueue_get_buf(out_vq, &len)
+		       && !virtqueue_is_broken(out_vq)) {
+			cpu_relax();
+			if ((++spins & 0xFFF) == 0) {
+				/* Z1-F11-C3-B: desc flags at the guest's used cursor. */
+				u32 z1flags = virtqueue_debug_used_flags(out_vq);
+				/* z1_llog(4, 2, 7, kwa_task_token(current), z1flags); */
+			}
+		}
+		/* z1_llog(4, 2, 7, kwa_task_token(current), (u32)spins | 0x80000000u); */
+	}
 done:
+	/* z1_llog(2, 2, 7, kwa_task_token(current), (u32)in_count); */
 	spin_unlock_irqrestore(&port->outvq_lock, flags);
 
 	port->stats.bytes_sent += in_count;
@@ -1129,8 +1150,10 @@ static int put_chars(u32 vtermno, const char *buf, int count)
 		return -EPIPE;
 
 	data = kmemdup(buf, count, GFP_ATOMIC);
-	if (!data)
+	if (!data) {
+		pr_info("Z1e\n");
 		return -ENOMEM;
+	}
 
 	sg_init_one(sg, data, count);
 	ret = __send_to_port(port, sg, 1, count, data, false);
@@ -1149,18 +1172,26 @@ static int get_chars(u32 vtermno, char *buf, int count)
 {
 	struct port *port;
 
+	/* Z1-F11: entry diag dropped (noise); ret diag below fits 16B TX. */
 	/* If we've not set up the port yet, we have no input to give. */
 	if (unlikely(early_put_chars))
 		return 0;
 
 	port = find_port_by_vtermno(vtermno);
-	if (!port)
+
+	if (!port) {
+		pr_info("Z1g NOPORT\n");
 		return -EPIPE;
+	}
 
 	/* If we don't have an input queue yet, we can't get input. */
 	BUG_ON(!port->in_vq);
 
-	return fill_readbuf(port, (__force char __user *)buf, count, false);
+	{
+		int z1ret = fill_readbuf(port, (__force char __user *)buf, count, false);
+		pr_info("Z1g %d\n", z1ret);
+		return z1ret;
+	}
 }
 
 static void resize_console(struct port *port)
@@ -1245,6 +1276,7 @@ static int init_port_console(struct port *port)
 	 * can do any size, so we put PAGE_SIZE here.
 	 */
 	port->cons.vtermno = pdrvdata.next_vtermno;
+	pr_info("Z1RXG: init_port_console vtermno=%u\n", port->cons.vtermno);
 
 	port->cons.hvc = hvc_alloc(port->cons.vtermno, 0, &hv_ops, PAGE_SIZE);
 	if (IS_ERR(port->cons.hvc)) {
@@ -1745,6 +1777,13 @@ static void out_intr(struct virtqueue *vq)
 	}
 
 	wake_up_interruptible(&port->waitqueue);
+	/* Z1-F11-C: TX completions must wake blocked console writers.
+	 * hvc_write/hvc_tty_write return partial when the outbuf fills and
+	 * sleep until hvc_write_wakeup; without this, any write larger than
+	 * the outbuf blocks forever (hush writev hang -> kill-init). Matches
+	 * mainline virtio_console.c out_intr. */
+	if (is_console_port(port) && port->cons.hvc)
+		hvc_console_tx_wakeup(port->cons.hvc);
 }
 
 static void in_intr(struct virtqueue *vq)
@@ -1754,9 +1793,12 @@ static void in_intr(struct virtqueue *vq)
 
 	port = find_port_by_vq(vq->vdev->priv, vq);
 	if (!port) {
+		pr_info("Z1i NOPORT\n");
 		flush_bufs(vq, false);
 		return;
 	}
+	pr_info("Z1i c=%d g=%d\n", is_console_port(port),
+		port->guest_connected);
 
 	spin_lock_irqsave(&port->inbuf_lock, flags);
 	port->inbuf = get_inbuf(port);
@@ -1778,8 +1820,10 @@ static void in_intr(struct virtqueue *vq)
 	 * guest_connected to true.
 	 */
 
-	if (!port->guest_connected && !is_rproc_serial(port->portdev->vdev))
+	if (!port->guest_connected && !is_rproc_serial(port->portdev->vdev)) {
+		pr_info("Z1i DISCARD\n");
 		discard_port_data(port);
+	}
 
 	/* Send a SIGIO indicating new data in case the process asked for it */
 	send_sigio_to_port(port);
@@ -1788,8 +1832,12 @@ static void in_intr(struct virtqueue *vq)
 
 	wake_up_interruptible(&port->waitqueue);
 
-	if (is_console_port(port) && hvc_poll(port->cons.hvc))
-		hvc_kick();
+	if (is_console_port(port)) {
+		int polled = hvc_poll(port->cons.hvc);
+		pr_info("Z1p %d\n", polled);
+		if (polled)
+			hvc_kick();
+	}
 }
 
 static void control_intr(struct virtqueue *vq)
@@ -2003,6 +2051,7 @@ static int virtcons_probe(struct virtio_device *vdev)
 	int err;
 	bool multiport;
 	bool early = early_put_chars != NULL;
+	pr_info("Z1RXG: virtcons_probe early=%d\n", early);
 
 	/* We only need a config space if features are offered */
 	if (!vdev->config->get &&

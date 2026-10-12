@@ -157,9 +157,14 @@ static struct virtqueue *vw_setup_vq(struct virtio_device *vdev, unsigned index,
 	{
 		struct virtio_wasm_device *vw_dev =
 			to_virtio_wasm_device(vdev);
+		/* Z1-F11-C4-D: publish the packed device-event area address so
+		 * the host can maintain the off_wrap/flags contract. Split rings
+		 * have a different layout — the host publishes nothing for them. */
+		u32 dev_evt_addr = virtqueue_get_dev_evt_addr32(vq);
 		wasm_virtio_enable_vring(vw_dev->host_id, vq->index,
 					 virtqueue_get_vring_size(vq),
-					 virtqueue_get_desc_addr(vq));
+					 virtqueue_get_desc_addr(vq),
+					 dev_evt_addr);
 	}
 
 	return vq;
