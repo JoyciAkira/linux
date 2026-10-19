@@ -481,9 +481,10 @@ SYSCALL_DEFINE5(z1_sockfd_stub, int, fd, unsigned long, a1, unsigned long, a2,
  * transition and wake/removal. The second read is fault-disabled: no kernel
  * page fault or sleep is allowed under the spinlock.
  *
- * Limitations (FAIL-CLOSED gate): no timeout/PI/requeue support. The key
- * models private process-mm futexes, NOT full cross-mm shared backing objects.
- * This is a T2 candidate, not certification or a claim of Linux futex parity.
+ * Scope limits: no timeout/PI/requeue support. Both FUTEX_WAIT(0) and
+ * FUTEX_WAIT_PRIVATE(128) currently use process-mm identity. This is enough
+ * for same-mm CLONE_VM threads but DOES NOT implement general cross-process
+ * shared futex backing identity. Do not claim shared futex parity or T2 PASS.
  */
 struct z1_futex_q {
 	struct task_struct *task;
