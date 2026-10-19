@@ -1,10 +1,13 @@
 #include <linux/entry-common.h>
 #include <linux/binfmts.h>
 #include <linux/sched.h>
+#include <linux/sched/wake_q.h>
+#include <linux/spinlock.h>
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <asm/globals.h>
+#include <asm/z1_futex.h>
 #include <asm/process_events.h>
 #include <asm/wasm_imports.h>
 
@@ -468,81 +471,165 @@ SYSCALL_DEFINE5(z1_sockfd_stub, int, fd, unsigned long, a1, unsigned long, a2,
 	return -ENOTSOCK;
 }
 
-/* Z1-F11-C5-5: minimal futex for guest pthreads. The wasm32 musl port spins
- * in pure CAS loops when futex returns -ENOSYS; the K5 user worker executes
- * one continuation at a time, so a spinning guest thread starves the lock
- * holder's kernel task (silent hang). A real FUTEX_WAIT parks the waiter
- * INSIDE the kernel scheduler, creating the scheduling point that lets the
- * holder run and release. Keys include the mm identity so exec'd images with
- * separate user memories never collide. No timeouts yet (Gate scope). */
+/* Z1-F11-C5 T2 candidate — PRIVATE-mm scoped futex WAIT/WAKE.
+ *
+ * A waiter owns its own queue node (on its suspended kernel syscall stack).
+ * The waker ONLY unlinks the node and queues a task wakeup; it must not free
+ * the node. The waiter unlinks itself on EVERY wakeup/interrupt/spurious
+ * return before its stack can be reclaimed.
+ *
+ * The bucket lock covers the second user-value compare, enqueue, state
+ * transition and wake/removal. The second read is fault-disabled: no kernel
+ * page fault or sleep is allowed under the spinlock.
+ *
+ * Scope limits: no timeout/PI/requeue support. Both FUTEX_WAIT(0) and
+ * FUTEX_WAIT_PRIVATE(128) currently use process-mm identity. This is enough
+ * for same-mm CLONE_VM threads but DOES NOT implement general cross-process
+ * shared futex backing identity. Do not claim shared futex parity or T2 PASS.
+ */
 struct z1_futex_q {
 	struct task_struct *task;
-	unsigned long key;
+	struct mm_struct *mm;
+	u32 __user *uaddr;
 	struct z1_futex_q *next;
+	bool queued;
+	bool woken;
 };
 
-static struct z1_futex_q *z1_futex_buckets[16];
-
-static unsigned long z1_futex_key(u32 __user *uaddr)
-{
-	return ((unsigned long)current->mm >> 4) ^ (unsigned long)uaddr;
-}
-
-static void z1_futex_enqueue(struct z1_futex_q *q)
-{
-	unsigned long k = q->key & 15;
-	q->next = z1_futex_buckets[k];
-	z1_futex_buckets[k] = q;
-}
-
+#define Z1_FUTEX_BUCKETS 16
 #define FUTEX_WAIT_OP 0
 #define FUTEX_WAKE_OP 1
 #define FUTEX_PRIVATE_FLAG 128
 
-SYSCALL_DEFINE3(z1_futex, u32 __user *, uaddr, int, op, u32, val)
+static DEFINE_SPINLOCK(z1_futex_lock);
+static struct z1_futex_q *z1_futex_buckets[Z1_FUTEX_BUCKETS];
+
+static unsigned int z1_futex_bucket(struct mm_struct *mm, u32 __user *uaddr)
 {
-	int cmd = op & ~FUTEX_PRIVATE_FLAG;
-	unsigned long key = z1_futex_key(uaddr);
+	unsigned long key = ((unsigned long)mm >> 4) ^
+			    ((unsigned long)uaddr >> 2);
+	return key & (Z1_FUTEX_BUCKETS - 1);
+}
 
-	if (cmd == FUTEX_WAIT_OP) {
-		struct z1_futex_q q;
-		u32 cur = 0;
-		struct z1_futex_q *it;
+/* Wake Z1 waiters using the explicit mm of the exiting task.  In
+ * mm_release(), current->mm is not an authoritative identity: the mm
+ * argument is the identity of the address space being released.
+ *
+ * The wait queue, lock and wake_q lifetime are shared with z1_futex
+ * FUTEX_WAKE; the native do_futex wake remains in kernel/fork.c.
+ */
+unsigned int z1_futex_wake_mm(struct mm_struct *mm, u32 __user *uaddr,
+			      unsigned int nr_wake)
+{
+	struct z1_futex_q **pp;
+	struct wake_q_head wake_q;
+	unsigned long flags;
+	unsigned int bucket, woken = 0;
 
-		raw_copy_from_user(&cur, uaddr, sizeof(cur));
-		if (cur != val)
-			return -EAGAIN;
-		for (it = z1_futex_buckets[key & 15]; it; it = it->next)
-			if (it->task == current)
-				return -EINVAL;
-
-		q.task = current;
-		q.key = key;
-		q.next = NULL;
-		z1_futex_enqueue(&q);
-
-		set_current_state(TASK_INTERRUPTIBLE);
-		schedule();
-		set_current_state(TASK_RUNNING);
+	if (!mm || !uaddr || !nr_wake)
 		return 0;
-	}
-	if (cmd == FUTEX_WAKE_OP) {
-		struct z1_futex_q **pp = &z1_futex_buckets[key & 15];
-		int nwake = (int)val;
-		int woken = 0;
 
-		while (*pp && woken < nwake) {
-			struct z1_futex_q *q = *pp;
-			if (q->key == key) {
-				*pp = q->next;
-				wake_up_process(q->task);
-				woken++;
-				kfree(q);
-				continue;
-			}
+	bucket = z1_futex_bucket(mm, uaddr);
+	wake_q_init(&wake_q);
+	spin_lock_irqsave(&z1_futex_lock, flags);
+	for (pp = &z1_futex_buckets[bucket]; *pp && woken < nr_wake;) {
+		struct z1_futex_q *q = *pp;
+
+		if (q->mm == mm && q->uaddr == uaddr) {
+			*pp = q->next;
+			q->next = NULL;
+			q->queued = false;
+			q->woken = true;
+			wake_q_add(&wake_q, q->task);
+			woken++;
+		} else {
 			pp = &q->next;
 		}
-		return woken;
 	}
+	spin_unlock_irqrestore(&z1_futex_lock, flags);
+	wake_up_q(&wake_q);
+	return woken;
+}
+
+SYSCALL_DEFINE6(z1_futex, u32 __user *, uaddr, int, op, u32, val,
+		void __user *, timeout, u32 __user *, uaddr2, u32, val3)
+{
+	const int cmd = op & ~FUTEX_PRIVATE_FLAG;
+	struct mm_struct *mm = current->mm;
+	unsigned long flags;
+	unsigned int bucket;
+
+	/* The historical 3-argument handler silently ignored a requested
+	 * timeout and the extra operands. Never promise unsupported Linux
+	 * semantics: reject these explicitly until T2 implements them. */
+	if (timeout || uaddr2 || val3)
+		return -ENOSYS;
+	if (!mm || !uaddr || ((unsigned long)uaddr & (sizeof(u32) - 1)))
+		return -EINVAL;
+	if (!access_ok(uaddr, sizeof(*uaddr)))
+		return -EFAULT;
+
+	bucket = z1_futex_bucket(mm, uaddr);
+	if (cmd == FUTEX_WAIT_OP) {
+		struct z1_futex_q q = {
+			.task = current,
+			.mm = mm,
+			.uaddr = uaddr,
+		};
+		struct z1_futex_q **pp;
+		unsigned long uncopied;
+		u32 cur = 0;
+		long result;
+
+		/* First read may fault normally; reject invalid guest pointers. */
+		if (raw_copy_from_user(&cur, uaddr, sizeof(cur)))
+			return -EFAULT;
+		if (cur != val)
+			return -EAGAIN;
+
+		spin_lock_irqsave(&z1_futex_lock, flags);
+		/* Recheck while holding the SAME lock WAKE must acquire.
+		 * Neither an intervening wake nor a user memory page fault can
+		 * create a check/enqueue gap. */
+		pagefault_disable();
+		uncopied = raw_copy_from_user(&cur, uaddr, sizeof(cur));
+		pagefault_enable();
+		if (uncopied) {
+			spin_unlock_irqrestore(&z1_futex_lock, flags);
+			return -EFAULT;
+		}
+		if (cur != val) {
+			spin_unlock_irqrestore(&z1_futex_lock, flags);
+			return -EAGAIN;
+		}
+
+		q.next = z1_futex_buckets[bucket];
+		z1_futex_buckets[bucket] = &q;
+		q.queued = true;
+		set_current_state(TASK_INTERRUPTIBLE);
+		spin_unlock_irqrestore(&z1_futex_lock, flags);
+
+		schedule();
+
+		/* The waiter, and ONLY the waiter, reclaims its stack object.
+		 * A signal or spurious wake must leave no dangling queue node. */
+		spin_lock_irqsave(&z1_futex_lock, flags);
+		if (q.queued) {
+			for (pp = &z1_futex_buckets[bucket]; *pp;
+			     pp = &(*pp)->next) {
+				if (*pp == &q) {
+					*pp = q.next;
+					break;
+				}
+			}
+			q.queued = false;
+		}
+		result = q.woken ? 0 : signal_pending(current) ? -EINTR : 0;
+		__set_current_state(TASK_RUNNING);
+		spin_unlock_irqrestore(&z1_futex_lock, flags);
+		return result;
+	}
+	if (cmd == FUTEX_WAKE_OP)
+		return z1_futex_wake_mm(mm, uaddr, val);
 	return -ENOSYS;
 }
