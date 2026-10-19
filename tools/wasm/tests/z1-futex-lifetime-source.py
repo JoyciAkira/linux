@@ -47,7 +47,7 @@ if "return z1_futex_wake_mm(mm, uaddr, val);" not in s:
     raise AssertionError("syscall FUTEX_WAKE bypasses shared Z1 wake authority")
 if "q->mm == mm && q->uaddr == uaddr" not in s:
     raise AssertionError("explicit-mm identity not enforced")
-if "#ifdef CONFIG_WASM\\n#include <asm/z1_futex.h>\\n#endif" not in fork:
+if "#ifdef CONFIG_WASM\n#include <asm/z1_futex.h>\n#endif" not in fork:
     raise AssertionError("arch-gated mm_release bridge missing")
 if "z1_futex_wake_mm(mm," not in fork:
     raise AssertionError("clear_child_tid does not wake Z1")
