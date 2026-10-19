@@ -38,4 +38,21 @@ if s.index("spin_unlock_irqrestore(&z1_futex_lock, flags);", s.index("wake_q_add
     raise AssertionError("wakeup must happen after releasing bucket lock")
 if s.index("if (q.queued)") < s.index("schedule();"):
     raise AssertionError("waiter-owned node must be cleaned after wake/interrupt")
+# Explicit-mm wake and ctid exit have one Z1 queue authority.
+fork = Path("kernel/fork.c").read_text()
+header = Path("arch/wasm/include/asm/z1_futex.h").read_text()
+if "unsigned int z1_futex_wake_mm(struct mm_struct *mm" not in s:
+    raise AssertionError("missing shared Z1 wake implementation")
+if "return z1_futex_wake_mm(mm, uaddr, val);" not in s:
+    raise AssertionError("syscall FUTEX_WAKE bypasses shared Z1 wake authority")
+if "q->mm == mm && q->uaddr == uaddr" not in s:
+    raise AssertionError("explicit-mm identity not enforced")
+if "#ifdef CONFIG_WASM\\n#include <asm/z1_futex.h>\\n#endif" not in fork:
+    raise AssertionError("arch-gated mm_release bridge missing")
+if "z1_futex_wake_mm(mm," not in fork:
+    raise AssertionError("clear_child_tid does not wake Z1")
+if fork.index("z1_futex_wake_mm(mm,") < fork.index("do_futex(tsk->clear_child_tid, FUTEX_WAKE"):
+    raise AssertionError("native futex wake must be retained before Z1 bridge")
+if "z1_futex_wake_mm(struct mm_struct *mm" not in header:
+    raise AssertionError("Z1 API declaration missing")
 print("Z1_FUTEX_SOURCE_LIFETIME_CONTRACT PASS (source only; T2 NOT CERTIFIED)")
