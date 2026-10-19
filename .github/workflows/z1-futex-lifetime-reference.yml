@@ -5,11 +5,15 @@ on:
       - 'review/z1-t2-futex-queue-lifetime-20261019'
     paths:
       - 'arch/wasm/kernel/syscall.c'
+      - 'arch/wasm/include/asm/z1_futex.h'
+      - 'kernel/fork.c'
       - 'tools/wasm/tests/z1-futex-lifetime-source.py'
       - '.github/workflows/z1-futex-lifetime-reference.yml'
   pull_request:
     paths:
       - 'arch/wasm/kernel/syscall.c'
+      - 'arch/wasm/include/asm/z1_futex.h'
+      - 'kernel/fork.c'
       - 'tools/wasm/tests/z1-futex-lifetime-source.py'
       - '.github/workflows/z1-futex-lifetime-reference.yml'
   workflow_dispatch:
@@ -26,8 +30,8 @@ jobs:
           REV: ${{ github.sha }}
         run: |
           set -euo pipefail
-          mkdir -p arch/wasm/kernel tools/wasm/tests
-          for path in arch/wasm/kernel/syscall.c tools/wasm/tests/z1-futex-lifetime-source.py; do
+          mkdir -p arch/wasm/kernel arch/wasm/include/asm kernel tools/wasm/tests
+          for path in arch/wasm/kernel/syscall.c arch/wasm/include/asm/z1_futex.h kernel/fork.c tools/wasm/tests/z1-futex-lifetime-source.py; do
             gh api "/repos/$REPO/contents/$path?ref=$REV" --jq .content | base64 -d > "$path"
             test -s "$path"
           done
