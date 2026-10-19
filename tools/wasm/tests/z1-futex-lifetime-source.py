@@ -23,6 +23,8 @@ requirements = {
     "kernel wake queue ownership": "wake_q_add(&wake_q, q->task);",
     "grouped wake outside lock": "wake_up_q(&wake_q);",
     "full mm/address equality": "q->mm == mm && q->uaddr == uaddr",
+    "six-argument Linux futex entry": "SYSCALL_DEFINE6(z1_futex",
+    "unsupported timeout is rejected": "if (timeout || uaddr2 || val3)",
     "unsupported operation fail closed": "return -ENOSYS;",
 }
 for title, fragment in requirements.items():
