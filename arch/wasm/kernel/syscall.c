@@ -510,13 +510,19 @@ static unsigned int z1_futex_bucket(struct mm_struct *mm, u32 __user *uaddr)
 	return key & (Z1_FUTEX_BUCKETS - 1);
 }
 
-SYSCALL_DEFINE3(z1_futex, u32 __user *, uaddr, int, op, u32, val)
+SYSCALL_DEFINE6(z1_futex, u32 __user *, uaddr, int, op, u32, val,
+		void __user *, timeout, u32 __user *, uaddr2, u32, val3)
 {
 	const int cmd = op & ~FUTEX_PRIVATE_FLAG;
 	struct mm_struct *mm = current->mm;
 	unsigned long flags;
 	unsigned int bucket;
 
+	/* The historical 3-argument handler silently ignored a requested
+	 * timeout and the extra operands. Never promise unsupported Linux
+	 * semantics: reject these explicitly until T2 implements them. */
+	if (timeout || uaddr2 || val3)
+		return -ENOSYS;
 	if (!mm || !uaddr || ((unsigned long)uaddr & (sizeof(u32) - 1)))
 		return -EINVAL;
 	if (!access_ok(uaddr, sizeof(*uaddr)))
