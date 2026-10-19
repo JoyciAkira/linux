@@ -7,6 +7,7 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <asm/globals.h>
+#include <asm/z1_futex.h>
 #include <asm/process_events.h>
 #include <asm/wasm_imports.h>
 
