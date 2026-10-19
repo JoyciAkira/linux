@@ -1,0 +1,38 @@
+name: Z1 T2 futex queue source guard (non-certifying)
+on:
+  push:
+    branches:
+      - 'review/z1-t2-futex-queue-lifetime-20261019'
+    paths:
+      - 'arch/wasm/kernel/syscall.c'
+      - 'tools/wasm/tests/z1-futex-lifetime-source.py'
+      - '.github/workflows/z1-futex-lifetime-reference.yml'
+  pull_request:
+    paths:
+      - 'arch/wasm/kernel/syscall.c'
+      - 'tools/wasm/tests/z1-futex-lifetime-source.py'
+      - '.github/workflows/z1-futex-lifetime-reference.yml'
+  workflow_dispatch:
+jobs:
+  source-guard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Fetch only pinned source files (avoid full Linux clone)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REV: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p arch/wasm/kernel tools/wasm/tests
+          for path in arch/wasm/kernel/syscall.c tools/wasm/tests/z1-futex-lifetime-source.py; do
+            gh api "/repos/$REPO/contents/$path?ref=$REV" --jq .content | base64 -d > "$path"
+            test -s "$path"
+          done
+      - name: Run non-certifying source invariants
+        run: python3 tools/wasm/tests/z1-futex-lifetime-source.py
+      - name: Scope of evidence
+        run: |
+          echo 'Static source safety guard ONLY. This is NOT an arch/wasm kernel build, scheduler race test, or T2 certification.' >> "$GITHUB_STEP_SUMMARY"
