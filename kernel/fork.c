@@ -55,6 +55,9 @@
 #include <linux/syscalls.h>
 #include <linux/jiffies.h>
 #include <linux/futex.h>
+#ifdef CONFIG_WASM
+#include <asm/z1_futex.h>
+#endif
 #include <linux/compat.h>
 #include <linux/kthread.h>
 #include <linux/task_io_accounting_ops.h>
@@ -1495,6 +1498,15 @@ static void mm_release(struct task_struct *tsk, struct mm_struct *mm)
 			ret = put_user(0, tsk->clear_child_tid);
 			do_futex(tsk->clear_child_tid, FUTEX_WAKE,
 					1, NULL, NULL, 0, 0);
+#ifdef CONFIG_WASM
+			/* The Z1 guest futex WAIT queue is distinct from the
+			 * generic Linux futex table.  Match the exiting mm,
+			 * not current->mm (which can already be detached).
+			 * Keep the normal Linux wake path above intact.
+			 */
+			z1_futex_wake_mm(mm,
+					   (u32 __user *)tsk->clear_child_tid, 1);
+#endif
 			if (!get_user(v, tsk->clear_child_tid) && !ret)
 				pr_err("G12-DIAG: ctid cleared pid=%d word=%d ret=%d\n",
 				       tsk->pid, v, ret);
