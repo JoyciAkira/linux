@@ -510,6 +510,46 @@ static unsigned int z1_futex_bucket(struct mm_struct *mm, u32 __user *uaddr)
 	return key & (Z1_FUTEX_BUCKETS - 1);
 }
 
+/* Wake Z1 waiters using the explicit mm of the exiting task.  In
+ * mm_release(), current->mm is not an authoritative identity: the mm
+ * argument is the identity of the address space being released.
+ *
+ * The wait queue, lock and wake_q lifetime are shared with z1_futex
+ * FUTEX_WAKE; the native do_futex wake remains in kernel/fork.c.
+ */
+unsigned int z1_futex_wake_mm(struct mm_struct *mm, u32 __user *uaddr,
+			      unsigned int nr_wake)
+{
+	struct z1_futex_q **pp;
+	struct wake_q_head wake_q;
+	unsigned long flags;
+	unsigned int bucket, woken = 0;
+
+	if (!mm || !uaddr || !nr_wake)
+		return 0;
+
+	bucket = z1_futex_bucket(mm, uaddr);
+	wake_q_init(&wake_q);
+	spin_lock_irqsave(&z1_futex_lock, flags);
+	for (pp = &z1_futex_buckets[bucket]; *pp && woken < nr_wake;) {
+		struct z1_futex_q *q = *pp;
+
+		if (q->mm == mm && q->uaddr == uaddr) {
+			*pp = q->next;
+			q->next = NULL;
+			q->queued = false;
+			q->woken = true;
+			wake_q_add(&wake_q, q->task);
+			woken++;
+		} else {
+			pp = &q->next;
+		}
+	}
+	spin_unlock_irqrestore(&z1_futex_lock, flags);
+	wake_up_q(&wake_q);
+	return woken;
+}
+
 SYSCALL_DEFINE6(z1_futex, u32 __user *, uaddr, int, op, u32, val,
 		void __user *, timeout, u32 __user *, uaddr2, u32, val3)
 {
@@ -588,32 +628,7 @@ SYSCALL_DEFINE6(z1_futex, u32 __user *, uaddr, int, op, u32, val,
 		spin_unlock_irqrestore(&z1_futex_lock, flags);
 		return result;
 	}
-	if (cmd == FUTEX_WAKE_OP) {
-		struct z1_futex_q **pp;
-		struct wake_q_head wake_q;
-		unsigned int woken = 0;
-
-		wake_q_init(&wake_q);
-		spin_lock_irqsave(&z1_futex_lock, flags);
-		for (pp = &z1_futex_buckets[bucket]; *pp && woken < val;) {
-			struct z1_futex_q *q = *pp;
-
-			/* Scalar hashes are only buckets, not an identity:
-			 * both mm and guest address MUST match exactly. */
-			if (q->mm == mm && q->uaddr == uaddr) {
-				*pp = q->next;
-				q->next = NULL;
-				q->queued = false;
-				q->woken = true;
-				wake_q_add(&wake_q, q->task);
-				woken++;
-			} else {
-				pp = &q->next;
-			}
-		}
-		spin_unlock_irqrestore(&z1_futex_lock, flags);
-		wake_up_q(&wake_q);
-		return woken;
-	}
+	if (cmd == FUTEX_WAKE_OP)
+		return z1_futex_wake_mm(mm, uaddr, val);
 	return -ENOSYS;
 }
