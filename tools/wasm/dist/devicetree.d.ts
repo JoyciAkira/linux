@@ -10,3 +10,4 @@ export declare function generate_devicetree(tree: DeviceTreeNode, { memory_reser
     boot_cpu_id?: number;
 }): Uint8Array<ArrayBuffer>;
 export {};
+//# sourceMappingURL=devicetree.d.ts.map

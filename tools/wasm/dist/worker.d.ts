@@ -1,3 +1,4 @@
+import { type EntryPacket } from "./util.ts";
 import { type D1Record, type D1RingMetadata } from "./d1-ring-buffer.ts";
 export interface InitMessage {
     fn: number;
@@ -19,22 +20,19 @@ export interface InitMessage {
      * initramfs must fit its static initramfs buffer (setup.c bound 512). */
     bootViaExport?: boolean;
     devicetree?: Uint8Array;
-    /** Z1-F11-S1: reserved authority scratch region for NR 247 snapshots. */
-    z1ScratchAddr?: number;
-    z1ScratchSize?: number;
     initramfs?: Uint8Array | null;
     /** K5: KERNEL-OWNED task token this user worker executes for. Sent with
      * every broker request as the routing key (kernel truth still stamped C-side). */
     taskToken?: number;
-    /** K5: user entry mode — "start": image entrypoint; "switch_entry": CLONE_VM
-     * table entry; "fork_user": fresh-memory fork resume with fork-ack. */
-    mode?: "start" | "switch_entry" | "fork_user";
     /** K5: real child pid for fork_user fork-ack (kernel fork_copied export). */
     forkPid?: number;
-    /** K4+: Captured argv bytes from authority TaskRecord at spawn time. */
-    argv?: Uint8Array | null;
-    /** Z1-F11-S1: kernel-authoritative argv length for exec children. */
-    argvLen?: number;
+    /** Kernel-owned argument snapshot; pointers remain based at argsBaseAddr. */
+    argsBytes?: Uint8Array;
+    argsBaseAddr?: number;
+    args?: string[];
+    entry?: EntryPacket;
+    /** Start-stripped module for thread children (CLONE_VM). */
+    user_module_noinit?: WebAssembly.Module;
 }
 export type WorkerMessage = {
     type: "spawn_worker";
@@ -45,18 +43,20 @@ export type WorkerMessage = {
     user_memory: WebAssembly.Memory | null;
     parent_tls_base?: number;
     brokerSab?: SharedArrayBuffer;
-    workerId?: number;
+    workerId: number;
     /** K5A: kernel authority workers bypass K4 secondary-worker gate. */
     isKernelAuthority?: boolean;
     /** K5: authority-originated spawn — KERNEL-OWNED task token + entry mode.
      * When workerId is present the authority assigned it (registry-bound);
      * main MUST use it instead of allocating its own. */
-    taskToken?: number;
-    mode?: "start" | "switch_entry" | "fork_user";
+    taskToken: number;
+    entry: EntryPacket;
     forkPid?: number;
-    /** Z1-F11-S1: kernel-authoritative argv length for exec children. */
-    argvLen?: number;
-    argv?: Uint8Array | null;
+    argsBytes?: Uint8Array;
+    argsBaseAddr?: number;
+    args?: string[];
+    /** Start-stripped module for thread children (CLONE_VM). */
+    user_module_noinit?: WebAssembly.Module;
 } | {
     type: "boot_console_write";
     message: ArrayBuffer;
@@ -131,7 +131,6 @@ export type WorkerMessage = {
     seq: number;
     ok: boolean;
     value: number;
-    irq?: number;
 } | {
     type: "authority_broker_kick";
 } | {
@@ -144,6 +143,13 @@ export type WorkerMessage = {
     configBytes: number;
     hasVirtioConsoleConfig: boolean;
     ts: number;
+}
+/** Authority → main: retire a user worker after TASK_DEAD or exec supersession. */
+ | {
+    type: "retire_worker";
+    workerId: number;
+    taskToken: number;
+    imageId: bigint;
 };
 /** K5: virtio device operations relayed authority→main. */
 export type VirtioOp = "set_features" | "setup" | "enable_vring" | "disable_vring" | "notify";
@@ -159,3 +165,4 @@ export interface AuthorityDiagMessage {
     ts: number;
 }
 export declare function exportD1Trace(): void;
+//# sourceMappingURL=worker.d.ts.map

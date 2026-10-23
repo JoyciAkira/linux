@@ -6,7 +6,7 @@
  * the record path. `sequence` is the canonical ordering authority and never
  * resets on wrap; wall-clock time is auxiliary only.
  */
-import { decodeSyscall } from './d1-syscall-decoder.js';
+import { decodeSyscall } from "./d1-syscall-decoder.js";
 const ERRNO_NAMES = {
     1: 'EPERM', 2: 'ENOENT', 3: 'ESRCH', 4: 'EINTR', 5: 'EIO', 9: 'EBADF',
     11: 'EAGAIN', 12: 'ENOMEM', 13: 'EACCES', 14: 'EFAULT', 16: 'EBUSY',
@@ -152,3 +152,4 @@ export class D1RingBuffer {
         this.overwrites = 0;
     }
 }
+//# sourceMappingURL=d1-ring-buffer.js.map

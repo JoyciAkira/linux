@@ -96,3 +96,4 @@ export declare class D1RingBuffer {
     getMetadata(): D1RingMetadata;
     clear(): void;
 }
+//# sourceMappingURL=d1-ring-buffer.d.ts.map

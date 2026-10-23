@@ -15,8 +15,30 @@ export const TERMINAL_TASK_EXIT = Symbol("terminal task exit");
  * untouched; the new-image continuation carries the task forward. */
 export const USER_IMAGE_REPLACED = Symbol("user image replaced");
 const wasmJspi = WebAssembly;
-export function kernel_imports({ is_worker, memory, spawn_worker, boot_console_write, boot_console_close, run_on_main, get_user_module, get_user_memory, process_event_handler, onKernelYield, onFinishTask, onSyscallComplete, onHaltWorker, spawnWorkerRaw, }) {
-    const mem = new Uint8Array(memory.buffer);
+/** Z1-G6-THREADS: rebindable user-memory binding. When the user image is
+ * replaced (exec/fork/switch_thread), the NEW WebAssembly.Memory must be
+ * visible to the kernel imports' memory-access handlers. JS function
+ * parameters are mutable bindings: reassigning `memory` here is seen by every
+ * nested closure. The worker registers this setter and calls it on image
+ * replacement; without rebinding, thread children resolve guest pointers
+ * against a stale boot-era buffer (RangeError 'Start offset ...'). */
+const z1KernelMemorySetters = [];
+export function z1RegisterKernelMemorySetter(fn) {
+    if (typeof fn === "function")
+        z1KernelMemorySetters.push(fn);
+}
+export function z1RebindKernelMemory(m) {
+    for (const fn of z1KernelMemorySetters)
+        fn(m);
+}
+export function kernel_imports({ is_worker, memory, spawn_worker, boot_console_write, boot_console_close, run_on_main, get_user_module, get_user_memory, process_event_handler, onKernelYield, onTimerDeadline, onFinishTask, onSyscallComplete, onHaltWorker, spawnWorkerRaw, }) {
+    // Z1-G6-THREADS: register rebindable memory setter so nested closures
+    // see updated memory binding on exec/fork/switch_thread image replacement.
+    let mem = new Uint8Array(memory.buffer);
+    z1RegisterKernelMemorySetter((m) => { if (m) {
+        memory = m;
+        mem = new Uint8Array(m.buffer);
+    } });
     const Suspending = wasmJspi.Suspending;
     if (onKernelYield && typeof Suspending !== "function") {
         throw new Error("[K5A] onKernelYield requested but WebAssembly.Suspending unavailable (JSPI required)");
@@ -60,6 +82,7 @@ export function kernel_imports({ is_worker, memory, spawn_worker, boot_console_w
             */
             return BigInt(Math.round((performance.now() + performance.timeOrigin) * 200)) * 5000n;
         },
+        set_timer_deadline: onTimerDeadline,
         get_stacktrace: (buf, size) => {
             // 5 lines: strip Error, strip 4 common lines of stack
             const trace = new TextEncoder().encode(new Error().stack?.split("\n").slice(5).join("\n"));
@@ -133,3 +156,4 @@ export function kernel_imports({ is_worker, memory, spawn_worker, boot_console_w
         },
     };
 }
+//# sourceMappingURL=wasm.js.map

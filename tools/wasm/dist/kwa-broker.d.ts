@@ -2,13 +2,14 @@
  * KWA Broker — Single Kernel Authority (K1 Six-Arg ABI)
  *
  * Implements the frozen protocol contract v2 (KWA-v2 §2–§3):
- * - SharedArrayBuffer ring with N_SLOTS=64, SLOT_SIZE=96B, SLOTS_OFF=64B.
+ * - SharedArrayBuffer ring with N_SLOTS=64, SLOT_SIZE=112B, SLOTS_OFF=64B.
  * - State machine: FREE (0) -> REQUESTED (1) -> CLAIMED (2) -> COMPLETED (3) -> CONSUMED (4) -> FREE (0).
  * - Owner word reservation (offset 68) before payload store; STATE=REQUESTED published last.
  * - BrokerOpcode namespace distinct from Linux __NR_*; only SYSCALL reads NR slot.
  * - Full six-arg syscall ABI: nr + a0..a5 transported distinctly; result + errno separate.
  * - Authority executes syscall via kernel export, stores RESULT/ERRNO/RESP_ID, then STATE=COMPLETED last.
- * - CPU worker waits with Atomics.wait until COMPLETED && RESP_ID == reqId.
+ * - CPU worker accepts COMPLETED only while still owning its slot and matching RESP_ID.
+ * - Terminal cancellation returns transport ESRCH without touching a replacement owner.
  */
 export declare const MAGIC = 1264009475;
 /** Broker opcodes — distinct from Linux __NR_* syscall numbers (§2 KWA-v2). */
@@ -111,3 +112,4 @@ export declare function serviceBrokerKick(syscallFn: (nr: number, a0: number, a1
     getTgid?: () => number;
     getGeneration: () => number;
 }): void;
+//# sourceMappingURL=kwa-broker.d.ts.map

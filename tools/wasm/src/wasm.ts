@@ -56,6 +56,7 @@ export interface Imports {
     boot_console_close(): void;
     return_address(_level: number): number;
     get_now_nsec(): bigint;
+    set_timer_deadline(cpu: number, deadlineNs: bigint): void;
     get_stacktrace(buf: number, size: number): void;
     spawn_worker(
       fn: number,
@@ -210,6 +211,21 @@ type JspiWebAssembly = typeof WebAssembly & {
   ) => (...args: Parameters<F>) => Promise<ReturnType<F>>;
 };
 const wasmJspi = WebAssembly as JspiWebAssembly;
+/** Z1-G6-THREADS: rebindable user-memory binding. When the user image is
+ * replaced (exec/fork/switch_thread), the NEW WebAssembly.Memory must be
+ * visible to the kernel imports' memory-access handlers. JS function
+ * parameters are mutable bindings: reassigning `memory` here is seen by every
+ * nested closure. The worker registers this setter and calls it on image
+ * replacement; without rebinding, thread children resolve guest pointers
+ * against a stale boot-era buffer (RangeError 'Start offset ...'). */
+const z1KernelMemorySetters: Array<(m: WebAssembly.Memory) => void> = [];
+export function z1RegisterKernelMemorySetter(fn: (m: WebAssembly.Memory) => void): void {
+  if (typeof fn === "function") z1KernelMemorySetters.push(fn);
+}
+export function z1RebindKernelMemory(m: WebAssembly.Memory): void {
+  for (const fn of z1KernelMemorySetters) fn(m);
+}
+
 export function kernel_imports(
   {
     is_worker,
@@ -222,6 +238,7 @@ export function kernel_imports(
     get_user_memory,
     process_event_handler,
     onKernelYield,
+    onTimerDeadline,
     onFinishTask,
     onSyscallComplete,
     onHaltWorker,
@@ -282,6 +299,8 @@ export function kernel_imports(
       selfTask: number,
       nextTask: number,
     ) => Promise<void>;
+    /** T3: replace/cancel the real per-CPU clockevent arm without suspending C. */
+    onTimerDeadline: (cpu: number, deadlineNs: bigint) => void;
     /** K5: authority terminal handoff — invoked when C calls
      * kernel.finish_task; MUST throw so the dead task's continuation dies
      * alone while the authority worker and sibling tasks survive. */
@@ -301,7 +320,11 @@ export function kernel_imports(
     onHaltWorker?: () => never;
   },
 ): Imports["kernel"] {
-  const mem = new Uint8Array(memory.buffer);
+  // Z1-G6-THREADS: register rebindable memory setter so nested closures
+  // see updated memory binding on exec/fork/switch_thread image replacement.
+  let mem = new Uint8Array(memory.buffer);
+  z1RegisterKernelMemorySetter((m) => { if (m) { memory = m; mem = new Uint8Array(m.buffer); } });
+
 
   const Suspending = wasmJspi.Suspending;
   if (onKernelYield && typeof Suspending !== "function") {
@@ -354,6 +377,7 @@ export function kernel_imports(
         Math.round((performance.now() + performance.timeOrigin) * 200),
       ) * 5000n;
     },
+    set_timer_deadline: onTimerDeadline,
 
     get_stacktrace: (buf, size) => {
       // 5 lines: strip Error, strip 4 common lines of stack

@@ -7,7 +7,7 @@
  * raw return value is returned unchanged. A thrown exception is rethrown
  * unchanged. Recording is opt-in (enabled=false => pure passthrough).
  */
-import { D1RingBuffer } from './d1-ring-buffer.js';
+import { D1RingBuffer } from "./d1-ring-buffer.js";
 export function wrapSyscall(originalSyscall, context) {
     if (!context.enabled) {
         return originalSyscall;
@@ -30,3 +30,4 @@ export function wrapSyscall(originalSyscall, context) {
         return ret;
     };
 }
+//# sourceMappingURL=d1-syscall-wrapper.js.map

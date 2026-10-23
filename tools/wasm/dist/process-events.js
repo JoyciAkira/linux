@@ -100,3 +100,4 @@ export function decodeKernelProcessEvent(raw) {
 export function makeRawProcessEventMessage(raw) {
     return { type: "process_event", ...raw };
 }
+//# sourceMappingURL=process-events.js.map

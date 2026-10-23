@@ -1,7 +1,7 @@
 import { assert } from "./util.js";
 export function Struct(layout) {
     let size = 0;
-    return class {
+    return class StructuredValue {
         #dv;
         constructor(view) {
             this.#dv = new DataView(view.buffer, view.byteOffset, view.byteLength);
@@ -171,3 +171,4 @@ export class Bytes {
         };
     }
 }
+//# sourceMappingURL=bytes.js.map

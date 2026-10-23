@@ -188,3 +188,4 @@ export declare function virtio_imports({ memory, devices, ncpus, trigger_irq_for
     trigger_irq_for_cpu: (cpu: number, irq: number) => void;
 }): Imports["virtio"];
 export {};
+//# sourceMappingURL=virtio.d.ts.map

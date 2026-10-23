@@ -34,3 +34,4 @@ export declare const SYSCALL_MAP: ReadonlyMap<number, string>;
 export declare function decodeSyscall(nr: number): string;
 /** True iff the syscall number has an authoritative decoded name. */
 export declare function isKnownSyscall(nr: number): boolean;
+//# sourceMappingURL=d1-syscall-decoder.d.ts.map

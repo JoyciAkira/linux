@@ -1,5 +1,5 @@
 import { type DeviceTreeNode, generate_devicetree } from "./devicetree.ts";
-import { assert, EventEmitter, unreachable } from "./util.ts";
+import { assert, EventEmitter, unreachable, validateEntry, type EntryPacket } from "./util.ts";
 import { virtio_imports, VirtioDevice } from "./virtio.ts";
 import type { Imports } from "./wasm.ts";
 import type {
@@ -84,12 +84,6 @@ const resources = (async () => {
 })();
 
 const INITCPIO_ADDR = 0x200000;
-/* Z1-F11-S1: authority scratch region, carved from the TOP of RAM and
- * reserved in the devicetree so the kernel's memblock never allocates it.
- * The authority uses it as the NR 247 argv-snapshot buffer (the kernel's
- * copy_to_user is a flat-space memcpy — any linear address works; the only
- * missing piece was a buffer the kernel would not hand out). */
-const Z1_SCRATCH_SIZE = 0x100000;
 
 export interface D1TraceMetadata {
   capacity: number;
@@ -179,10 +173,8 @@ export class Machine extends EventEmitter<{
   #d1_trace_enabled: boolean = false;
   #d1_run_id: string = "d1-run";
   #brokerSab: SharedArrayBuffer;
-  /** Main-assigned transport ids only for legacy secondary spawns; authority
-   * ids live in 1..n (authority itself = 1, user workers from 2), so legacy
-   * ids start at 1M to keep the spaces disjoint. */
-  #nextWorkerId: number = 1_000_000;
+  /** Authority-keyed worker registry. Retirement requires matching identity. */
+  #workerRegistry = new Map<number, { worker: Worker; taskToken: number; imageId: bigint }>();
   #process_event_handler?: (
     event_kind: number,
     run_id_hi: bigint,
@@ -315,11 +307,6 @@ export class Machine extends EventEmitter<{
 
   async boot() {
     const memory_reservations: { address: number; size: number }[] = [];
-    const totalBytes = this.#memory.buffer.byteLength;
-    memory_reservations.push({
-      address: totalBytes - Z1_SCRATCH_SIZE,
-      size: Z1_SCRATCH_SIZE,
-    });
     if (this.#initcpio) {
       memory_reservations.push({
         address: INITCPIO_ADDR,
@@ -352,7 +339,6 @@ export class Machine extends EventEmitter<{
     // worker) reaches them through virtio_cmd/virtio_result round-trips and
     // receives IRQs back through authority_irq.
     let vimports: Imports["virtio"] | null = null;
-    const deviceIrqs = new Map<number, number>();
 
     const wireWorker = (worker: Worker) => {
       worker.onmessage = async (
@@ -360,6 +346,7 @@ export class Machine extends EventEmitter<{
       ) => {
         switch (event.data.type) {
           case "spawn_worker":
+            assert(worker === authorityWorker, "User spawn requires kernel authority");
             spawn_worker(
               event.data.fn,
               event.data.arg,
@@ -368,10 +355,12 @@ export class Machine extends EventEmitter<{
               event.data.user_memory,
               event.data.workerId,
               event.data.taskToken,
-              event.data.mode,
+              event.data.entry,
               event.data.forkPid,
-              event.data.argv,
-              event.data.argvLen,
+              event.data.argsBytes,
+              event.data.argsBaseAddr,
+              event.data.args,
+              event.data.user_module_noinit,
             );
             break;
           case "boot_console_write":
@@ -414,6 +403,7 @@ export class Machine extends EventEmitter<{
             });
             break;
           case "worker_done": {
+            assert(worker === authorityWorker, "Only kernel authority may finish the VM");
             const idx = this.#workers.indexOf(worker);
             if (idx !== -1) {
               this.#workers.splice(idx, 1);
@@ -421,6 +411,36 @@ export class Machine extends EventEmitter<{
             worker.onmessage = null;
             worker.onerror = null;
             worker.terminate();
+            break;
+          }
+          case "retire_worker": {
+            if (event.target !== authorityWorker) {
+              console.error("[K5] retire_worker from non-authority worker ignored");
+              break;
+            }
+            const { workerId, taskToken, imageId } = event.data;
+            const reg = this.#workerRegistry.get(workerId);
+            if (!reg) {
+              console.warn(`[K5] retire_worker for unknown workerId=${workerId}`);
+              break;
+            }
+            if (reg.taskToken !== taskToken || reg.imageId !== imageId) {
+              console.warn(`[K5] retire_worker identity mismatch for workerId=${workerId}`);
+              break;
+            }
+            const idx = this.#workers.indexOf(reg.worker);
+            if (idx !== -1) this.#workers.splice(idx, 1);
+            reg.worker.onmessage = null;
+            reg.worker.onerror = null;
+            reg.worker.terminate();
+            this.#workerRegistry.delete(workerId);
+            this.emit("authority_diag", {
+              type: "authority_diag",
+              stage: "WORKER_RETIRED",
+              ok: true,
+              detail: { workerId, taskToken, imageId: imageId.toString(16) },
+              ts: performance.now(),
+            });
             break;
           }
           case "broker_kick": {
@@ -500,7 +520,6 @@ export class Machine extends EventEmitter<{
               if (op === "set_features") {
                 callVirtio.set_features(dev, event.data.features ?? 0n);
               } else if (op === "setup") {
-                deviceIrqs.set(dev, args[0]!);
                 callVirtio.setup(
                   dev,
                   args[0]!,
@@ -522,22 +541,18 @@ export class Machine extends EventEmitter<{
               } else {
                 await Promise.resolve(callVirtio.notify(dev, args[0]!));
               }
-              const deviceIrq = deviceIrqs.get(dev);
               worker.postMessage({
                 type: "virtio_result",
                 seq,
                 ok: true,
                 value: 0,
-                irq: deviceIrq,
               });
             } catch (error) {
-              const deviceIrq = deviceIrqs.get(dev);
               worker.postMessage({
                 type: "virtio_result",
                 seq,
                 ok: false,
                 value: 0,
-                irq: deviceIrq,
               });
               console.error(
                 `[K5] virtio ${op} dev=${dev} failed:`,
@@ -568,40 +583,49 @@ export class Machine extends EventEmitter<{
       name: string,
       user_module: WebAssembly.Module | null,
       user_memory: WebAssembly.Memory | null,
-      workerId?: number,
-      taskToken?: number,
-      mode?: InitMessage["mode"],
+      workerId: number,
+      taskToken: number,
+      entry: EntryPacket,
       forkPid?: number,
-      argv?: Uint8Array | null,
-      argvLen?: number,
+      argsBytes?: Uint8Array,
+      argsBaseAddr?: number,
+      args?: string[],
+      user_module_noinit?: WebAssembly.Module,
     ) => {
+      assert(Number.isInteger(workerId) && workerId > 1 && workerId <= 0x7fffffff,
+        "Invalid authority-issued worker identity");
+      assert(Number.isInteger(taskToken) && taskToken > 0 && taskToken <= 0x7fffffff,
+        "Invalid kernel task token");
+      assert(!this.#workerRegistry.has(workerId), "Duplicate user worker identity");
+      entry = validateEntry(entry);
+      assert(user_module && user_memory && Array.isArray(args),
+        "User spawn requires task-bound image, memory and kernel arguments");
       console.log(
-        `[SPW] fn=${fn} name=${name} umodule=${typeof user_module}:${String(user_module).slice(0, 40)} umem=${typeof user_memory}:${String(user_memory)} taskToken=${taskToken} mode=${mode}`,
+        `[SPW] fn=${fn} name=${name} umodule=${typeof user_module}:${String(user_module).slice(0, 40)} umem=${typeof user_memory}:${String(user_memory)} taskToken=${taskToken} entry=${entry?.type ?? "none"}`,
       );
       const worker = new Worker(new URL("./worker.js", import.meta.url), {
         type: "module",
         name,
       });
       this.#workers.push(worker);
+      this.#workerRegistry.set(workerId, { worker, taskToken, imageId: entry.imageId });
       wireWorker(worker);
       worker.postMessage(
         {
           fn,
           arg,
-          // K3/K5A: secondary workers NEVER receive the kernel module;
-          // authority creation is exclusive to the Machine.boot path below.
           memory: this.#memory,
           parent_user_module: user_module,
           parent_user_memory: user_memory,
-          // K4/K5: broker SAB + transport worker id for syscall routing.
-          // Authority-assigned ids are used verbatim (registry-bound).
           brokerSab: this.#brokerSab,
-          workerId: workerId ?? this.#nextWorkerId++,
+          workerId,
           taskToken,
-          mode,
+          entry,
           forkPid,
-          argv,
-          argvLen,
+          argsBytes,
+          argsBaseAddr,
+          args,
+          user_module_noinit,
           d1TraceEnabled: this.#d1_trace_enabled,
           d1RunId: this.#d1_run_id,
         } satisfies InitMessage,
@@ -646,8 +670,6 @@ export class Machine extends EventEmitter<{
         workerId: 1,
         d1TraceEnabled: this.#d1_trace_enabled,
         d1RunId: this.#d1_run_id,
-        z1ScratchAddr: this.#memory.buffer.byteLength - Z1_SCRATCH_SIZE,
-        z1ScratchSize: Z1_SCRATCH_SIZE,
       } satisfies InitMessage,
     );
   }

@@ -60,3 +60,4 @@ export declare function formatRunId(hi: bigint, lo: bigint): string;
 export declare function decodeLinuxWaitStatus(rawStatus: bigint): KernelTerminalStatus;
 export declare function decodeKernelProcessEvent(raw: RawKernelProcessEvent): KernelProcessEvent;
 export declare function makeRawProcessEventMessage(raw: RawKernelProcessEvent): RawProcessEventMessage;
+//# sourceMappingURL=process-events.d.ts.map

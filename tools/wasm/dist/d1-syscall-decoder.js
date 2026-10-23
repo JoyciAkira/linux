@@ -87,3 +87,4 @@ export function decodeSyscall(nr) {
 export function isKnownSyscall(nr) {
     return SYSCALL_MAP.has(nr);
 }
+//# sourceMappingURL=d1-syscall-decoder.js.map

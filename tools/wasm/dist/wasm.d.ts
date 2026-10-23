@@ -34,6 +34,7 @@ export interface Imports {
         boot_console_close(): void;
         return_address(_level: number): number;
         get_now_nsec(): bigint;
+        set_timer_deadline(cpu: number, deadlineNs: bigint): void;
         get_stacktrace(buf: number, size: number): void;
         spawn_worker(fn: number, arg: number, comm: number, comm_len: number, share_user_memory: number, taskToken: number, spawn_flags: number): void;
         /** K5A: cooperative yield — 4-arg shared C ABI. selfTask/nextTask are
@@ -108,7 +109,9 @@ export declare const TERMINAL_TASK_EXIT: unique symbol;
  * Linux task did NOT die: registry, attribution and quiesce state stay
  * untouched; the new-image continuation carries the task forward. */
 export declare const USER_IMAGE_REPLACED: unique symbol;
-export declare function kernel_imports({ is_worker, memory, spawn_worker, boot_console_write, boot_console_close, run_on_main, get_user_module, get_user_memory, process_event_handler, onKernelYield, onFinishTask, onSyscallComplete, onHaltWorker, spawnWorkerRaw, }: {
+export declare function z1RegisterKernelMemorySetter(fn: (m: WebAssembly.Memory) => void): void;
+export declare function z1RebindKernelMemory(m: WebAssembly.Memory): void;
+export declare function kernel_imports({ is_worker, memory, spawn_worker, boot_console_write, boot_console_close, run_on_main, get_user_module, get_user_memory, process_event_handler, onKernelYield, onTimerDeadline, onFinishTask, onSyscallComplete, onHaltWorker, spawnWorkerRaw, }: {
     is_worker: boolean;
     memory: WebAssembly.Memory;
     /** Adapted spawn callback (name decoded, user module/memory attached).
@@ -134,6 +137,8 @@ export declare function kernel_imports({ is_worker, memory, spawn_worker, boot_c
      * are kernel-owned opaque task addresses; the authority starts or resumes
      * ONLY nextTask and parks selfTask until its own deadline/external wake. */
     onKernelYield?: (reason: number, deadlineNs: bigint, selfTask: number, nextTask: number) => Promise<void>;
+    /** T3: replace/cancel the real per-CPU clockevent arm without suspending C. */
+    onTimerDeadline: (cpu: number, deadlineNs: bigint) => void;
     /** K5: authority terminal handoff — invoked when C calls
      * kernel.finish_task; MUST throw so the dead task's continuation dies
      * alone while the authority worker and sibling tasks survive. */
@@ -145,3 +150,4 @@ export declare function kernel_imports({ is_worker, memory, spawn_worker, boot_c
      * rejection) while the worker and its sibling continuations survive. */
     onHaltWorker?: () => never;
 }): Imports["kernel"];
+//# sourceMappingURL=wasm.d.ts.map

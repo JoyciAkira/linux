@@ -19,6 +19,9 @@ void wasm_import(kernel, boot_console_close)(void);
 void *wasm_import(kernel, return_address)(int level);
 
 unsigned long long wasm_import(kernel, get_now_nsec)(void);
+/* T3: replace the CPU clockevent arm synchronously; zero cancels it.
+ * The host only marks a pending IRQ at expiry; C services it on its own stack. */
+void wasm_import(kernel, set_timer_deadline)(u32 cpu, u64 deadline_ns);
 
 void wasm_import(kernel, get_stacktrace)(char *buf, size_t size);
 

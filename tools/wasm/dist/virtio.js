@@ -850,3 +850,4 @@ export function virtio_imports({ memory, devices, ncpus, trigger_irq_for_cpu, })
         },
     };
 }
+//# sourceMappingURL=virtio.js.map

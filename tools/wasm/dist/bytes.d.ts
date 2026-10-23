@@ -31,3 +31,4 @@ export declare class Bytes {
     get dv(): DataView<ArrayBufferLike>;
     alloc<T>(type: Type<T>): Allocated<T>;
 }
+//# sourceMappingURL=bytes.d.ts.map

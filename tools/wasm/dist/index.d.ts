@@ -57,3 +57,4 @@ export declare class Machine extends EventEmitter<{
     });
     boot(): Promise<void>;
 }
+//# sourceMappingURL=index.d.ts.map

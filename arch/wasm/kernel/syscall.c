@@ -482,7 +482,7 @@ SYSCALL_DEFINE5(z1_sockfd_stub, int, fd, unsigned long, a1, unsigned long, a2,
  * transition and wake/removal. The second read is fault-disabled: no kernel
  * page fault or sleep is allowed under the spinlock.
  *
- * Scope limits: no timeout/PI/requeue support. Both FUTEX_WAIT(0) and
+ * Scope limits: no timeout/PI support. Both FUTEX_WAIT(0) and
  * FUTEX_WAIT_PRIVATE(128) currently use process-mm identity. This is enough
  * for same-mm CLONE_VM threads but DOES NOT implement general cross-process
  * shared futex backing identity. Do not claim shared futex parity or T2 PASS.
@@ -499,6 +499,7 @@ struct z1_futex_q {
 #define Z1_FUTEX_BUCKETS 16
 #define FUTEX_WAIT_OP 0
 #define FUTEX_WAKE_OP 1
+#define FUTEX_REQUEUE_OP 3
 #define FUTEX_PRIVATE_FLAG 128
 
 static DEFINE_SPINLOCK(z1_futex_lock);
@@ -551,23 +552,81 @@ unsigned int z1_futex_wake_mm(struct mm_struct *mm, u32 __user *uaddr,
 	return woken;
 }
 
+/* Wake and transfer waiters atomically. Detached nodes are spliced only
+ * after traversal so colliding source/destination buckets cannot cycle. */
+static long z1_futex_requeue_mm(struct mm_struct *mm, u32 __user *uaddr,
+			       u32 __user *uaddr2, unsigned int nr_wake,
+			       unsigned int nr_requeue)
+{
+	struct z1_futex_q **pp, *moved = NULL, **tail = &moved;
+	struct wake_q_head wake_q;
+	unsigned long flags;
+	unsigned int source = z1_futex_bucket(mm, uaddr);
+	unsigned int target = z1_futex_bucket(mm, uaddr2);
+	unsigned int woken = 0, requeued = 0;
+
+	wake_q_init(&wake_q);
+	spin_lock_irqsave(&z1_futex_lock, flags);
+	for (pp = &z1_futex_buckets[source];
+	     *pp && (woken < nr_wake || requeued < nr_requeue);) {
+		struct z1_futex_q *q = *pp;
+
+		if (q->mm != mm || q->uaddr != uaddr) {
+			pp = &q->next;
+			continue;
+		}
+		*pp = q->next;
+		q->next = NULL;
+		if (woken < nr_wake) {
+			q->queued = false;
+			q->woken = true;
+			wake_q_add(&wake_q, q->task);
+			woken++;
+		} else {
+			q->uaddr = uaddr2;
+			*tail = q;
+			tail = &q->next;
+			requeued++;
+		}
+	}
+	if (moved) {
+		*tail = z1_futex_buckets[target];
+		z1_futex_buckets[target] = moved;
+	}
+	spin_unlock_irqrestore(&z1_futex_lock, flags);
+	wake_up_q(&wake_q);
+	return woken + requeued;
+}
+
 SYSCALL_DEFINE6(z1_futex, u32 __user *, uaddr, int, op, u32, val,
 		void __user *, timeout, u32 __user *, uaddr2, u32, val3)
 {
-	const int cmd = op & ~FUTEX_PRIVATE_FLAG;
+	const int carrier_flag = 1U << 30;
+	const int cmd = op & ~(FUTEX_PRIVATE_FLAG | carrier_flag);
 	struct mm_struct *mm = current->mm;
 	unsigned long flags;
 	unsigned int bucket;
 
-	/* The historical 3-argument handler silently ignored a requested
-	 * timeout and the extra operands. Never promise unsupported Linux
-	 * semantics: reject these explicitly until T2 implements them. */
-	if (timeout || uaddr2 || val3)
+	/* WAIT/WAKE carriers use A3 as RIP metadata. For REQUEUE it is
+	 * the actual transfer count, and A4 is the destination address. */
+	if (cmd != FUTEX_REQUEUE_OP &&
+	    ((!(op & carrier_flag) && timeout) || uaddr2 || val3))
 		return -ENOSYS;
 	if (!mm || !uaddr || ((unsigned long)uaddr & (sizeof(u32) - 1)))
 		return -EINVAL;
 	if (!access_ok(uaddr, sizeof(*uaddr)))
 		return -EFAULT;
+
+	if (cmd == FUTEX_REQUEUE_OP) {
+		u32 nr_requeue = (u32)(unsigned long)timeout;
+
+		if ((s32)val < 0 || (s32)nr_requeue < 0 ||
+		    !uaddr2 || ((unsigned long)uaddr2 & (sizeof(u32) - 1)))
+			return -EINVAL;
+		if (!access_ok(uaddr2, sizeof(*uaddr2)))
+			return -EFAULT;
+		return z1_futex_requeue_mm(mm, uaddr, uaddr2, val, nr_requeue);
+	}
 
 	bucket = z1_futex_bucket(mm, uaddr);
 	if (cmd == FUTEX_WAIT_OP) {
@@ -584,8 +643,11 @@ SYSCALL_DEFINE6(z1_futex, u32 __user *, uaddr, int, op, u32, val,
 		/* First read may fault normally; reject invalid guest pointers. */
 		if (raw_copy_from_user(&cur, uaddr, sizeof(cur)))
 			return -EFAULT;
-		if (cur != val)
+		if (cur != val) {
+			/* No timer preemption: let runnable siblings make progress. */
+			schedule();
 			return -EAGAIN;
+		}
 
 		spin_lock_irqsave(&z1_futex_lock, flags);
 		/* Recheck while holding the SAME lock WAKE must acquire.
@@ -600,6 +662,7 @@ SYSCALL_DEFINE6(z1_futex, u32 __user *, uaddr, int, op, u32, val,
 		}
 		if (cur != val) {
 			spin_unlock_irqrestore(&z1_futex_lock, flags);
+			schedule();
 			return -EAGAIN;
 		}
 
@@ -615,6 +678,7 @@ SYSCALL_DEFINE6(z1_futex, u32 __user *, uaddr, int, op, u32, val,
 		 * A signal or spurious wake must leave no dangling queue node. */
 		spin_lock_irqsave(&z1_futex_lock, flags);
 		if (q.queued) {
+			bucket = z1_futex_bucket(q.mm, q.uaddr);
 			for (pp = &z1_futex_buckets[bucket]; *pp;
 			     pp = &(*pp)->next) {
 				if (*pp == &q) {

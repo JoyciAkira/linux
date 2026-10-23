@@ -2,13 +2,14 @@
  * KWA Broker — Single Kernel Authority (K1 Six-Arg ABI)
  *
  * Implements the frozen protocol contract v2 (KWA-v2 §2–§3):
- * - SharedArrayBuffer ring with N_SLOTS=64, SLOT_SIZE=96B, SLOTS_OFF=64B.
+ * - SharedArrayBuffer ring with N_SLOTS=64, SLOT_SIZE=112B, SLOTS_OFF=64B.
  * - State machine: FREE (0) -> REQUESTED (1) -> CLAIMED (2) -> COMPLETED (3) -> CONSUMED (4) -> FREE (0).
  * - Owner word reservation (offset 68) before payload store; STATE=REQUESTED published last.
  * - BrokerOpcode namespace distinct from Linux __NR_*; only SYSCALL reads NR slot.
  * - Full six-arg syscall ABI: nr + a0..a5 transported distinctly; result + errno separate.
  * - Authority executes syscall via kernel export, stores RESULT/ERRNO/RESP_ID, then STATE=COMPLETED last.
- * - CPU worker waits with Atomics.wait until COMPLETED && RESP_ID == reqId.
+ * - CPU worker accepts COMPLETED only while still owning its slot and matching RESP_ID.
+ * - Terminal cancellation returns transport ESRCH without touching a replacement owner.
  */
 export const MAGIC = 0x4b574103; // "KWA\3"
 /** Broker opcodes — distinct from Linux __NR_* syscall numbers (§2 KWA-v2). */
@@ -169,6 +170,12 @@ export class BrokerClient {
         // 3. Wait for COMPLETED with matching RESP_ID
         for (;;) {
             const st = Atomics.load(this.#i32, si);
+            // Cancellation can free and reassign this slot before its old client wakes.
+            // Observe state before ownership; never inspect or clear a replacement response.
+            if (st === STATE.FREE ||
+                Atomics.load(this.#u32, idx(slot, S.OWNER)) !== this.#workerId) {
+                return { result: -1, errno: 3, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
+            }
             if (st === STATE.COMPLETED) {
                 const respId = Atomics.load(this.#u32, idx(slot, S.RESP_ID));
                 if (respId === reqId)
@@ -322,3 +329,4 @@ export function serviceBrokerKick(syscallFn, brokerSab, kernelIdentity) {
         getGeneration: kernelIdentity.getGeneration,
     });
 }
+//# sourceMappingURL=kwa-broker.js.map
