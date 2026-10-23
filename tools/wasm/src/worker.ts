@@ -270,15 +270,6 @@ function compileContinuationImage(bytes: Uint8Array): WebAssembly.Module {
     const size = uleb();
     const end = pos + size;
     assert(end <= bytes.length, "Truncated Wasm section");
-    if (id === 11) {
-      const count = uleb();
-      for (let i = 0; i < count; i++) {
-        assert(uleb() === 1, "Active data segment cannot share continuation memory");
-        const dataSize = uleb();
-        pos += dataSize;
-        assert(pos <= end, "Truncated passive Wasm data");
-      }
-    }
     if (id !== 8) {
       chunks.push(bytes.subarray(start, end));
       length += end - start;
@@ -1722,7 +1713,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
                   firstArg.includes("/bin/node");
               }
               const initial = isHeavy ? 12288 : 1024; // 768MiB vs 64MiB
-              const maximum = 65536; // 4 GiB: Blink mappings cross the signed i32 boundary.
+              const maximum = isHeavy ? 65536 : 32768; // 4 GiB for Blink, 2 GiB for native wasm (matches module limits)
               t.userMemory = new WebAssembly.Memory({
                 initial,
                 maximum,
@@ -1781,9 +1772,16 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
             const parentPages = Math.ceil(
               parent.userMemory.buffer.byteLength / 65536,
             );
+            let isHeavy = false;
+            if (parent.args.length > 0) {
+              const firstArg = parent.args[0] ?? "";
+              isHeavy =
+                firstArg.includes("/bin/blink") ||
+                firstArg.includes("/bin/node");
+            }
             const fresh = new WebAssembly.Memory({
               initial: Math.max(parentPages, 1),
-              maximum: 65536,
+              maximum: isHeavy ? 65536 : 32768,
               shared: true,
             });
             new Uint8Array(fresh.buffer).set(

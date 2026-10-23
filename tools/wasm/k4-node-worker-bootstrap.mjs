@@ -97,6 +97,9 @@ parentPort.on("message", async (rawData) => {
         parent_tls_base: rawData.parent_tls_base ?? 0,
         brokerSab: rawData.brokerSab,
         workerId: rawData.workerId,
+        taskToken: rawData.taskToken ?? 1,
+        args: rawData.args ?? ["k4-user-module"],
+        entry: rawData.entry ?? { version: 1, imageId: 1n, type: "START_PROCESS" },
         d1TraceEnabled: rawData.d1TraceEnabled,
         d1RunId: rawData.d1RunId,
       };
@@ -117,6 +120,10 @@ parentPort.on("message", async (rawData) => {
         type: "k4_user_results",
         results,
         callCount,
+      });
+      parentPort.postMessage({
+        type: "worker_done",
+        reason: "k4_user_module_completed",
       });
     } catch (err) {
       parentPort.postMessage({
