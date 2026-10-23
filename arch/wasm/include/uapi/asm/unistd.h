@@ -29,6 +29,7 @@ __SYSCALL(__NR_z1_snapshot_args, sys_z1_snapshot_args)
  * Return the semantically correct errors instead: socket creation reports
  * -EAFNOSUPPORT (address family unsupported), everything on an fd reports
  * -ENOTSOCK (fd is not a socket). */
+#ifndef CONFIG_NET
 __SYSCALL(__NR_socket, sys_z1_socket_stub)
 __SYSCALL(__NR_socketpair, sys_z1_socketpair_stub)
 __SYSCALL(__NR_bind, sys_z1_sockfd_stub)
@@ -42,6 +43,7 @@ __SYSCALL(__NR_recvfrom, sys_z1_sockfd_stub)
 __SYSCALL(__NR_setsockopt, sys_z1_sockfd_stub)
 __SYSCALL(__NR_getsockopt, sys_z1_sockfd_stub)
 __SYSCALL(__NR_shutdown, sys_z1_sockfd_stub)
+#endif
 
 /* Z1-F11-C5-5: real futex WAIT/WAKE — guest pthread locks park inside the
  * kernel scheduler instead of pure-CAS spinning (which starves sibling

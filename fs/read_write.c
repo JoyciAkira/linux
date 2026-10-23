@@ -602,7 +602,6 @@ static inline loff_t *file_ppos(struct file *file)
 ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
 {
 	struct fd f = fdget_pos(fd);
-	pr_info("Z1V%d\n", fd);
 	ssize_t ret = -EBADF;
 
 	if (f.file) {

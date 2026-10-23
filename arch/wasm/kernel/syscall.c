@@ -450,6 +450,7 @@ SYSCALL_DEFINE2(z1_snapshot_args, void __user *, buf, size_t, len)
 	return args->argc;
 }
 
+#ifndef CONFIG_NET
 /* Z1-F11-C4-D: no socket subsystem in the wasm kernel. Stubs return the
  * semantically correct errno (see asm/unistd.h override table) instead of
  * the generic -ENOSYS from sys_ni_syscall, which guest libc treats as a
@@ -470,7 +471,7 @@ SYSCALL_DEFINE5(z1_sockfd_stub, int, fd, unsigned long, a1, unsigned long, a2,
 {
 	return -ENOTSOCK;
 }
-
+#endif
 /* Z1-F11-C5 T2 candidate — PRIVATE-mm scoped futex WAIT/WAKE.
  *
  * A waiter owns its own queue node (on its suspended kernel syscall stack).

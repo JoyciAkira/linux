@@ -268,7 +268,7 @@ CONFIG_NEED_PER_CPU_KM=y
 # end of Data Access Monitoring
 # end of Memory Management options
 
-# CONFIG_NET is not set
+CONFIG_NET=y
 
 #
 # Device Drivers
@@ -1340,3 +1340,7 @@ CONFIG_CC_HAS_SANCOV_TRACE_PC=y
 #
 # end of Rust hacking
 # end of Kernel hacking
+CONFIG_UNIX=y
+CONFIG_INET=y
+CONFIG_NETDEVICES=y
+CONFIG_VIRTIO_NET=y
