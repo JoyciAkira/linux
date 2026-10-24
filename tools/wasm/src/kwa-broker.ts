@@ -228,7 +228,7 @@ export class BrokerClient {
       // Observe state before ownership; never inspect or clear a replacement response.
       if (st === STATE.FREE ||
           Atomics.load(this.#u32, idx(slot, S.OWNER)) !== this.#workerId) {
-        return { result: -1, errno: 3, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
+        return { result: -1, errno: 3, cancelled: true, kernelPid: 0, kernelTgid: 0, kernelGeneration: 0 };
       }
       if (st === STATE.COMPLETED) {
         const respId = Atomics.load(this.#u32, idx(slot, S.RESP_ID));

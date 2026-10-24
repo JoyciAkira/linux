@@ -351,7 +351,7 @@ function createGuestImports(data: InitMessage, entry: EntryPacket): WebAssembly.
     (nr: number, a0: number, a1: number, a2: number, a3: number, a4: number, a5: number) => {
       if (nr === 245) return copyRawArgs(a0, a1);
       const result = invoke(nr, a0, a1, a2, a3, a4, a5);
-      if (result.errno === 3) throw TERMINAL_TASK_EXIT;
+      if (result.cancelled) throw TERMINAL_TASK_EXIT;
       if (nr === 244 && result.result === 0) tlsBase = a0 >>> 0;
       if (nr === 93 || nr === 94)
         throw new Error("Linux exit unexpectedly returned without task retirement");
