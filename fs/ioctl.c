@@ -858,6 +858,7 @@ SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
 	struct fd f = fdget(fd);
 	int error;
 
+	pr_err("[SYS_IOCTL] fd=%u cmd=0x%x arg=0x%lx\\n", fd, cmd, arg);
 	if (!f.file)
 		return -EBADF;
 

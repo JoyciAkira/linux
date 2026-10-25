@@ -1034,6 +1034,7 @@ int devinet_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr)
 
 	ifr->ifr_name[IFNAMSIZ - 1] = 0;
 
+	pr_err("[DEVINET_IOCTL] cmd=0x%x name='%s' sin_fam=%d haddr=0x%x\\n", cmd, ifr->ifr_name, sin->sin_family, ntohl(sin->sin_addr.s_addr));
 	/* save original address for comparison */
 	memcpy(&sin_orig, sin, sizeof(*sin));
 
