@@ -17,3 +17,4 @@ export interface D1WrapperContext {
     getThreadId?: () => number;
 }
 export declare function wrapSyscall(originalSyscall: SyscallHostFn, context: D1WrapperContext): SyscallHostFn;
+//# sourceMappingURL=d1-syscall-wrapper.d.ts.map

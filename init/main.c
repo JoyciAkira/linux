@@ -1626,6 +1626,7 @@ void __init console_on_rootfs(void)
 {
 	struct file *file = filp_open("/dev/console", O_RDWR, 0);
 
+	pr_info("Z1O %d\n", IS_ERR(file) ? (int)PTR_ERR(file) : 0);
 	if (IS_ERR(file)) {
 		pr_err("Warning: unable to open an initial console: %ld\n", PTR_ERR(file));
 		return;

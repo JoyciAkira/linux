@@ -1,8 +1,13 @@
 #include <linux/entry-common.h>
+#include <linux/binfmts.h>
 #include <linux/sched.h>
+#include <linux/sched/wake_q.h>
+#include <linux/spinlock.h>
+#include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <asm/globals.h>
+#include <asm/z1_futex.h>
 #include <asm/process_events.h>
 #include <asm/wasm_imports.h>
 
@@ -303,9 +308,393 @@ SYSCALL_DEFINE1(set_thread_area, unsigned long, addr)
 	return 0;
 }
 
+/* Z1-GABI (KWA-v2.1): real guest startup ABI. Compact, non-destructive read
+ * of the exec-captured argv/envp block. Layout written to @buf:
+ *   [0] argc   [4] envc
+ *   [8..]      argv[] guest pointers (argc entries)
+ *   [..]       envp[] guest pointers (envc entries)
+ *   [..]       NUL-terminated argument/env strings
+ * Returns argc on success; -EINVAL if the task has no args block;
+ * -ENOBUFS if @len is smaller than the compact size (nothing written).
+ * The kernel keeps ownership of the block (repeatable reads; fork
+ * children inherit it). */
+SYSCALL_DEFINE2(z1_get_args, void __user *, buf, size_t, len)
+{
+	struct wasm_process_args *args = current_thread_info()->args;
+	size_t ptrs, strings, total, off;
+	unsigned long *out;
+	int i;
+
+	if (!args)
+		return -EINVAL;
+
+	strings = 0;
+	for (i = 0; i < args->argc; i++)
+		strings += strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+	for (i = 0; i < args->envc; i++)
+		strings += strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+	ptrs = (size_t)(args->argc + args->envc) * sizeof(unsigned long);
+	total = 8 + ptrs + strings;
+	if (len < total)
+		return -ENOBUFS;
+
+	out = kmalloc(total, GFP_KERNEL);
+	if (!out)
+		return -ENOMEM;
+	out[0] = (unsigned long)args->argc;
+	out[1] = (unsigned long)args->envc;
+	off = 8 + ptrs;
+	for (i = 0; i < args->argc; i++) {
+		size_t sl = strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+		out[2 + i] = (unsigned long)buf + off;
+		off += sl;
+	}
+	for (i = 0; i < args->envc; i++) {
+		size_t sl = strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+		out[2 + args->argc + i] = (unsigned long)buf + off;
+		off += sl;
+	}
+	off = 8 + ptrs;
+	for (i = 0; i < args->argc; i++) {
+		size_t sl = strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+		memcpy((char *)out + off, args->argv[i], sl);
+		off += sl;
+	}
+	for (i = 0; i < args->envc; i++) {
+		size_t sl = strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+		memcpy((char *)out + off, args->envp[i], sl);
+		off += sl;
+	}
+
+	if (copy_to_user(buf, out, total)) {
+		kfree(out);
+		return -EFAULT;
+	}
+	kfree(out);
+	return args->argc;
+}
+
+/* Z1-GABI (KWA-v2.1): real TLS read. Returns the task's tp_value set via
+ * set_thread_area; U32_MAX means "never set" (thread_info init sentinel). */
+SYSCALL_DEFINE0(z1_get_thread_area)
+{
+	struct thread_info *ti = task_thread_info(current);
+	return ti->tp_value;
+}
+
 __attribute__((export_name("get_thread_area"))) unsigned long
 wasm_get_thread_area(void)
 {
 	struct thread_info *ti = task_thread_info(current);
 	return ti->tp_value;
+}
+
+/* Z1-F11 (KWA-v2.1): Non-destructive argv/envp snapshot for host authority.
+ * Unlike get_args(), this does NOT modify pointers or free the args block.
+ * Writes compact layout [argc@0, envc@4, ptrs@8.., strings] to user buf.
+ * Returns argc on success; -EINVAL if no args; -ENOBUFS if len too small.
+ * Safe to call multiple times; kernel retains ownership of args block. */
+SYSCALL_DEFINE2(z1_snapshot_args, void __user *, buf, size_t, len)
+{
+	struct wasm_process_args *args = current_thread_info()->args;
+	size_t ptrs, strings, total, off;
+	unsigned long *out;
+	int i;
+
+	if (!args)
+		return -EINVAL;
+
+	strings = 0;
+	for (i = 0; i < args->argc; i++)
+		strings += strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+	for (i = 0; i < args->envc; i++)
+		strings += strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+	ptrs = (size_t)(args->argc + args->envc) * sizeof(unsigned long);
+	total = 8 + ptrs + strings;
+	if (len < total)
+		return -ENOBUFS;
+
+	out = kmalloc(total, GFP_KERNEL);
+	if (!out)
+		return -ENOMEM;
+	out[0] = (unsigned long)args->argc;
+	out[1] = (unsigned long)args->envc;
+	off = 8 + ptrs;
+	for (i = 0; i < args->argc; i++) {
+		size_t sl = strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+		out[2 + i] = (unsigned long)buf + off;
+		off += sl;
+	}
+	for (i = 0; i < args->envc; i++) {
+		size_t sl = strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+		out[2 + args->argc + i] = (unsigned long)buf + off;
+		off += sl;
+	}
+	off = 8 + ptrs;
+	for (i = 0; i < args->argc; i++) {
+		size_t sl = strnlen(args->argv[i], MAX_ARG_STRLEN) + 1;
+		memcpy((char *)out + off, args->argv[i], sl);
+		off += sl;
+	}
+	for (i = 0; i < args->envc; i++) {
+		size_t sl = strnlen(args->envp[i], MAX_ARG_STRLEN) + 1;
+		memcpy((char *)out + off, args->envp[i], sl);
+		off += sl;
+	}
+
+	if (copy_to_user(buf, out, total)) {
+		kfree(out);
+		return -EFAULT;
+	}
+	kfree(out);
+	return args->argc;
+}
+
+#ifndef CONFIG_NET
+/* Z1-F11-C4-D: no socket subsystem in the wasm kernel. Stubs return the
+ * semantically correct errno (see asm/unistd.h override table) instead of
+ * the generic -ENOSYS from sys_ni_syscall, which guest libc treats as a
+ * fatal kernel-capability failure (musl a_crash → wasm unreachable). */
+SYSCALL_DEFINE3(z1_socket_stub, int, family, int, type, int, protocol)
+{
+	return -EAFNOSUPPORT;
+}
+
+SYSCALL_DEFINE4(z1_socketpair_stub, int, family, int, type, int, protocol,
+		int __user *, sv)
+{
+	return -EAFNOSUPPORT;
+}
+
+SYSCALL_DEFINE5(z1_sockfd_stub, int, fd, unsigned long, a1, unsigned long, a2,
+		unsigned long, a3, unsigned long, a4)
+{
+	return -ENOTSOCK;
+}
+#endif
+/* Z1-F11-C5 T2 candidate — PRIVATE-mm scoped futex WAIT/WAKE.
+ *
+ * A waiter owns its own queue node (on its suspended kernel syscall stack).
+ * The waker ONLY unlinks the node and queues a task wakeup; it must not free
+ * the node. The waiter unlinks itself on EVERY wakeup/interrupt/spurious
+ * return before its stack can be reclaimed.
+ *
+ * The bucket lock covers the second user-value compare, enqueue, state
+ * transition and wake/removal. The second read is fault-disabled: no kernel
+ * page fault or sleep is allowed under the spinlock.
+ *
+ * Scope limits: no timeout/PI support. Both FUTEX_WAIT(0) and
+ * FUTEX_WAIT_PRIVATE(128) currently use process-mm identity. This is enough
+ * for same-mm CLONE_VM threads but DOES NOT implement general cross-process
+ * shared futex backing identity. Do not claim shared futex parity or T2 PASS.
+ */
+struct z1_futex_q {
+	struct task_struct *task;
+	struct mm_struct *mm;
+	u32 __user *uaddr;
+	struct z1_futex_q *next;
+	bool queued;
+	bool woken;
+};
+
+#define Z1_FUTEX_BUCKETS 16
+#define FUTEX_WAIT_OP 0
+#define FUTEX_WAKE_OP 1
+#define FUTEX_REQUEUE_OP 3
+#define FUTEX_PRIVATE_FLAG 128
+
+static DEFINE_SPINLOCK(z1_futex_lock);
+static struct z1_futex_q *z1_futex_buckets[Z1_FUTEX_BUCKETS];
+
+static unsigned int z1_futex_bucket(struct mm_struct *mm, u32 __user *uaddr)
+{
+	unsigned long key = ((unsigned long)mm >> 4) ^
+			    ((unsigned long)uaddr >> 2);
+	return key & (Z1_FUTEX_BUCKETS - 1);
+}
+
+/* Wake Z1 waiters using the explicit mm of the exiting task.  In
+ * mm_release(), current->mm is not an authoritative identity: the mm
+ * argument is the identity of the address space being released.
+ *
+ * The wait queue, lock and wake_q lifetime are shared with z1_futex
+ * FUTEX_WAKE; the native do_futex wake remains in kernel/fork.c.
+ */
+unsigned int z1_futex_wake_mm(struct mm_struct *mm, u32 __user *uaddr,
+			      unsigned int nr_wake)
+{
+	struct z1_futex_q **pp;
+	struct wake_q_head wake_q;
+	unsigned long flags;
+	unsigned int bucket, woken = 0;
+
+	if (!mm || !uaddr || !nr_wake)
+		return 0;
+
+	bucket = z1_futex_bucket(mm, uaddr);
+	wake_q_init(&wake_q);
+	spin_lock_irqsave(&z1_futex_lock, flags);
+	for (pp = &z1_futex_buckets[bucket]; *pp && woken < nr_wake;) {
+		struct z1_futex_q *q = *pp;
+
+		if (q->mm == mm && q->uaddr == uaddr) {
+			*pp = q->next;
+			q->next = NULL;
+			q->queued = false;
+			q->woken = true;
+			wake_q_add(&wake_q, q->task);
+			woken++;
+		} else {
+			pp = &q->next;
+		}
+	}
+	spin_unlock_irqrestore(&z1_futex_lock, flags);
+	wake_up_q(&wake_q);
+	return woken;
+}
+
+/* Wake and transfer waiters atomically. Detached nodes are spliced only
+ * after traversal so colliding source/destination buckets cannot cycle. */
+static long z1_futex_requeue_mm(struct mm_struct *mm, u32 __user *uaddr,
+			       u32 __user *uaddr2, unsigned int nr_wake,
+			       unsigned int nr_requeue)
+{
+	struct z1_futex_q **pp, *moved = NULL, **tail = &moved;
+	struct wake_q_head wake_q;
+	unsigned long flags;
+	unsigned int source = z1_futex_bucket(mm, uaddr);
+	unsigned int target = z1_futex_bucket(mm, uaddr2);
+	unsigned int woken = 0, requeued = 0;
+
+	wake_q_init(&wake_q);
+	spin_lock_irqsave(&z1_futex_lock, flags);
+	for (pp = &z1_futex_buckets[source];
+	     *pp && (woken < nr_wake || requeued < nr_requeue);) {
+		struct z1_futex_q *q = *pp;
+
+		if (q->mm != mm || q->uaddr != uaddr) {
+			pp = &q->next;
+			continue;
+		}
+		*pp = q->next;
+		q->next = NULL;
+		if (woken < nr_wake) {
+			q->queued = false;
+			q->woken = true;
+			wake_q_add(&wake_q, q->task);
+			woken++;
+		} else {
+			q->uaddr = uaddr2;
+			*tail = q;
+			tail = &q->next;
+			requeued++;
+		}
+	}
+	if (moved) {
+		*tail = z1_futex_buckets[target];
+		z1_futex_buckets[target] = moved;
+	}
+	spin_unlock_irqrestore(&z1_futex_lock, flags);
+	wake_up_q(&wake_q);
+	return woken + requeued;
+}
+
+SYSCALL_DEFINE6(z1_futex, u32 __user *, uaddr, int, op, u32, val,
+		void __user *, timeout, u32 __user *, uaddr2, u32, val3)
+{
+	const int carrier_flag = 1U << 30;
+	const int cmd = op & ~(FUTEX_PRIVATE_FLAG | carrier_flag);
+	struct mm_struct *mm = current->mm;
+	unsigned long flags;
+	unsigned int bucket;
+
+	/* WAIT/WAKE carriers use A3 as RIP metadata. For REQUEUE it is
+	 * the actual transfer count, and A4 is the destination address. */
+	if (cmd != FUTEX_REQUEUE_OP &&
+	    ((!(op & carrier_flag) && timeout) || uaddr2 || val3))
+		return -ENOSYS;
+	if (!mm || !uaddr || ((unsigned long)uaddr & (sizeof(u32) - 1)))
+		return -EINVAL;
+	if (!access_ok(uaddr, sizeof(*uaddr)))
+		return -EFAULT;
+
+	if (cmd == FUTEX_REQUEUE_OP) {
+		u32 nr_requeue = (u32)(unsigned long)timeout;
+
+		if ((s32)val < 0 || (s32)nr_requeue < 0 ||
+		    !uaddr2 || ((unsigned long)uaddr2 & (sizeof(u32) - 1)))
+			return -EINVAL;
+		if (!access_ok(uaddr2, sizeof(*uaddr2)))
+			return -EFAULT;
+		return z1_futex_requeue_mm(mm, uaddr, uaddr2, val, nr_requeue);
+	}
+
+	bucket = z1_futex_bucket(mm, uaddr);
+	if (cmd == FUTEX_WAIT_OP) {
+		struct z1_futex_q q = {
+			.task = current,
+			.mm = mm,
+			.uaddr = uaddr,
+		};
+		struct z1_futex_q **pp;
+		unsigned long uncopied;
+		u32 cur = 0;
+		long result;
+
+		/* First read may fault normally; reject invalid guest pointers. */
+		if (raw_copy_from_user(&cur, uaddr, sizeof(cur)))
+			return -EFAULT;
+		if (cur != val) {
+			/* No timer preemption: let runnable siblings make progress. */
+			schedule();
+			return -EAGAIN;
+		}
+
+		spin_lock_irqsave(&z1_futex_lock, flags);
+		/* Recheck while holding the SAME lock WAKE must acquire.
+		 * Neither an intervening wake nor a user memory page fault can
+		 * create a check/enqueue gap. */
+		pagefault_disable();
+		uncopied = raw_copy_from_user(&cur, uaddr, sizeof(cur));
+		pagefault_enable();
+		if (uncopied) {
+			spin_unlock_irqrestore(&z1_futex_lock, flags);
+			return -EFAULT;
+		}
+		if (cur != val) {
+			spin_unlock_irqrestore(&z1_futex_lock, flags);
+			schedule();
+			return -EAGAIN;
+		}
+
+		q.next = z1_futex_buckets[bucket];
+		z1_futex_buckets[bucket] = &q;
+		q.queued = true;
+		set_current_state(TASK_INTERRUPTIBLE);
+		spin_unlock_irqrestore(&z1_futex_lock, flags);
+
+		schedule();
+
+		/* The waiter, and ONLY the waiter, reclaims its stack object.
+		 * A signal or spurious wake must leave no dangling queue node. */
+		spin_lock_irqsave(&z1_futex_lock, flags);
+		if (q.queued) {
+			bucket = z1_futex_bucket(q.mm, q.uaddr);
+			for (pp = &z1_futex_buckets[bucket]; *pp;
+			     pp = &(*pp)->next) {
+				if (*pp == &q) {
+					*pp = q.next;
+					break;
+				}
+			}
+			q.queued = false;
+		}
+		result = q.woken ? 0 : signal_pending(current) ? -EINTR : 0;
+		__set_current_state(TASK_RUNNING);
+		spin_unlock_irqrestore(&z1_futex_lock, flags);
+		return result;
+	}
+	if (cmd == FUTEX_WAKE_OP)
+		return z1_futex_wake_mm(mm, uaddr, val);
+	return -ENOSYS;
 }

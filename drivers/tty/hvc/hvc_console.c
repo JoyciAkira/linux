@@ -10,6 +10,7 @@
  */
 
 #include <linux/console.h>
+#include <asm/globals.h>
 #include <linux/cpumask.h>
 #include <linux/init.h>
 #include <linux/kbd_kern.h>
@@ -496,11 +497,39 @@ static int hvc_push(struct hvc_struct *hp)
 	return n;
 }
 
+/* Z1-F11-C: TX-completion wakeup. Called from virtio_console out_intr when
+ * the host recycles TX descriptors; drains blocked console writers the same
+ * way hvc_poll's tail does, without depending on RX traffic to poll. */
+void hvc_console_tx_wakeup(struct hvc_struct *hp)
+{
+	unsigned long flags;
+	struct tty_struct *tty;
+
+	spin_lock_irqsave(&hp->lock, flags);
+	if (!hp->do_wakeup) {
+		spin_unlock_irqrestore(&hp->lock, flags);
+		return;
+	}
+	hp->do_wakeup = 0;
+	tty = tty_port_tty_get(&hp->port);
+	spin_unlock_irqrestore(&hp->lock, flags);
+	if (tty) {
+		tty_wakeup(tty);
+		tty_kref_put(tty);
+	}
+}
+
+void z1_llog(u32 type, u32 lock_id, u32 site, u32 token, u32 data);
+u32 z1_lhold(u32 lock_id, u32 token);
+
 static int hvc_write(struct tty_struct *tty, const unsigned char *buf, int count)
 {
 	struct hvc_struct *hp = tty->driver_data;
 	unsigned long flags;
 	int rsize, written = 0;
+	void z1_llog(u32 type, u32 lock_id, u32 site, u32 token, u32 data);
+	u32 z1_lhold(u32 lock_id, u32 token);
+	pr_info("Z1W %d\n", count);
 
 	/* This write was probably executed during a tty close. */
 	if (!hp)
@@ -512,8 +541,11 @@ static int hvc_write(struct tty_struct *tty, const unsigned char *buf, int count
 
 	while (count > 0) {
 		int ret = 0;
+		u32 z1prev;
 
 		spin_lock_irqsave(&hp->lock, flags);
+		z1prev = z1_lhold(1, kwa_task_token(current));
+		/* z1_llog(1, 1, 1, kwa_task_token(current), z1prev); */
 
 		rsize = hp->outbuf_size - hp->n_outbuf;
 
@@ -530,6 +562,8 @@ static int hvc_write(struct tty_struct *tty, const unsigned char *buf, int count
 		if (hp->n_outbuf > 0)
 			ret = hvc_push(hp);
 
+		/* z1_llog(2, 1, 1, kwa_task_token(current), (u32)ret); */
+		/* z1_lhold(1, 0); */
 		spin_unlock_irqrestore(&hp->lock, flags);
 
 		if (!ret)
@@ -548,6 +582,7 @@ static int hvc_write(struct tty_struct *tty, const unsigned char *buf, int count
 	if (hp->n_outbuf)
 		hvc_kick();
 
+	pr_info("R5w %d\n", (int)written);
 	return written;
 }
 
@@ -721,6 +756,7 @@ static int __hvc_poll(struct hvc_struct *hp, bool may_sleep)
 		tty_insert_flip_char(&hp->port, buf[i], 0);
 	}
 	read_total += n;
+	pr_info("R4 %d %d\n", n, read_total);
 
 	if (may_sleep) {
 		/* Keep going until the flip is full */
@@ -747,11 +783,17 @@ static int __hvc_poll(struct hvc_struct *hp, bool may_sleep)
  bail:
 	spin_unlock_irqrestore(&hp->lock, flags);
 
+	pr_info("R4T %d\n", read_total);
 	if (read_total) {
 		/* Activity is occurring, so reset the polling backoff value to
 		   a minimum for performance. */
 		timeout = MIN_TIMEOUT;
 
+		/* Z1-F12-R4c: queue_work/flush_work are no-ops in the wasm port
+		   (workqueues never initialized, system_unbound_wq == NULL,
+		   queue_work never sets WORK_PENDING). tty_flip_buffer_push()
+		   now runs flush_to_ldisc() synchronously (see tty_buffer.c),
+		   delivering RX bytes to the ldisc inline. */
 		tty_flip_buffer_push(&hp->port);
 	}
 	tty_kref_put(tty);

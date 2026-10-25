@@ -12,7 +12,7 @@ export function Struct<T extends object>(
 ) {
   let size = 0;
 
-  return class {
+  return class StructuredValue {
     #dv: DataView;
     constructor(view: ArrayBufferView) {
       this.#dv = new DataView(view.buffer, view.byteOffset, view.byteLength);
@@ -26,10 +26,10 @@ export function Struct<T extends object>(
       ) {
         const offset = size;
         Object.defineProperty(this.prototype, key, {
-          get() {
+          get(this: StructuredValue) {
             return type.get(this.#dv, offset);
           },
-          set(value) {
+          set(this: StructuredValue, value: unknown) {
             type.set(this.#dv, offset, value);
           },
         });

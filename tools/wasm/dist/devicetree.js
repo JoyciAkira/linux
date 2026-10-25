@@ -134,3 +134,4 @@ export function generate_devicetree(tree, { memory_reservations = [], boot_cpu_i
     header.value.totalsize = bytes.length;
     return bytes.array;
 }
+//# sourceMappingURL=devicetree.js.map

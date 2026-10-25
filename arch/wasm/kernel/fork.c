@@ -22,6 +22,7 @@ struct clone_fn {
 int wasm_call_clone_fn(void *arg)
 {
 	struct clone_fn *clone_fn = arg;
+	pr_info("Z1FN=%lx\n", (unsigned long)(uintptr_t)clone_fn->fn);
 	wasm_user_switch_entry((uintptr_t)clone_fn->fn,
 			       (uintptr_t)clone_fn->arg);
 	wasm_user_instantiate(false);

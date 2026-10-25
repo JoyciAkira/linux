@@ -30,3 +30,4 @@ export function wrapSyscall(originalSyscall, context) {
         return ret;
     };
 }
+//# sourceMappingURL=d1-syscall-wrapper.js.map

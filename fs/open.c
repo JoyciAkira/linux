@@ -1313,6 +1313,9 @@ static long do_sys_openat2(int dfd, const char __user *filename,
 	if (IS_ERR(tmp))
 		return PTR_ERR(tmp);
 
+	/* Z1-F11-C4-D diag: log the resolved open path. */
+	pr_info("Z1OPEN|%s\n", tmp->name);
+
 	fd = get_unused_fd_flags(how->flags);
 	if (fd >= 0) {
 		struct file *f = do_filp_open(dfd, tmp, &op);

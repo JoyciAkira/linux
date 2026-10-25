@@ -66,6 +66,7 @@ const instance = await WebAssembly.instantiate(vmlinuxModule, {
     boot_console_close: () => {},
     return_address: () => 0,
     get_now_nsec: () => BigInt(Math.round((performance.now() + performance.timeOrigin) * 200)) * 5000n,
+    set_timer_deadline: () => {},
     get_stacktrace: () => {},
     spawn_worker: () => {},
     run_on_main: () => {},

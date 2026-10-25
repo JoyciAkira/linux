@@ -1,6 +1,7 @@
 #include <asm/globals.h>
 #include <asm/smp.h>
 #include <asm/timex.h>
+#include <asm/wasm_imports.h>
 #include <linux/cpu.h>
 #include <linux/bitops.h>
 #include <linux/hardirq.h>
@@ -12,65 +13,42 @@
 
 static DEFINE_PER_CPU(unsigned long, irqflags);
 static DEFINE_PER_CPU(atomic64_t, irq_pending);
-static DEFINE_PER_CPU(u64, timer_deadline_ns);
 
 void wasm_set_timer_deadline(u64 deadline_ns)
 {
-	__this_cpu_write(timer_deadline_ns, deadline_ns);
-}
-
-u64 wasm_get_timer_deadline(void)
-{
-	return __this_cpu_read(timer_deadline_ns);
+	wasm_kernel_set_timer_deadline(get_current_cpu(), deadline_ns);
 }
 
 void __cpuidle arch_cpu_idle(void)
 {
 	atomic64_t *pending = this_cpu_ptr(&irq_pending);
-	u64 deadline = __this_cpu_read(timer_deadline_ns);
 	struct kwa_exec_ctx ctx;
-	u64 now;
-	u64 timeout_ns;
 
-	if (deadline == 0) {
-		timeout_ns = 0; // indefinite
-	} else {
-		now = wasm_kernel_get_now_nsec();
-		if ((s64)(deadline - now) <= 0) {
-			__this_cpu_write(timer_deadline_ns, 0);
-			atomic64_or(1 << TIMER_IRQ, pending);
-			raw_local_irq_enable();
-			return;
-		}
-		timeout_ns = deadline; // absolute deadline for yield
-	}
-
-	// K5: Cooperative yield. The host sets a timer for the absolute
-	// deadline and — when it expires — MUST raise the kernel timer IRQ via
-	// trigger_irq_for_cpu before resuming this continuation, so the expiry
-	// becomes a real timer interrupt. Host resumes exactly this task.
-	for (;;) {
-		kwa_context_suspend(&ctx, KWA_YIELD_IDLE, timeout_ns,
+	/* The CPU clockevent arm is independent of idle. Its host expiry marks
+	 * the real pending IRQ and kicks this condition-rechecking frame.
+	 * Never clear a deadline here: an IRQ handler may already have rearmed it. */
+	while (atomic64_read(pending) == 0)
+		kwa_context_suspend(&ctx, KWA_YIELD_IDLE, 0,
 				    kwa_task_token(get_current_task()));
-		if (atomic64_read(pending) != 0)
-			break;
-		if (timeout_ns != 0 &&
-		    (s64)(timeout_ns - wasm_kernel_get_now_nsec()) <= 0)
-			break;
-	}
-
-	if (atomic64_read(pending) & (1 << TIMER_IRQ)) {
-		__this_cpu_write(timer_deadline_ns, 0);
-	}
 
 	raw_local_irq_enable();
 }
+
+void z1_llog(u32 type, u32 lock_id, u32 site, u32 token, u32 data);
 
 void cpu_relax(void)
 {
 	unsigned long flags;
 	struct kwa_exec_ctx ctx;
 	local_irq_save(flags);
+	/* Z1-F11-C: yields with IRQs disabled (i.e. holding a spinlock or in
+	 * IRQ context) park the holder — if the resume machinery ever loses
+	 * this one, every waiter on the held lock hangs with it. Ring-buffer
+	 * logging only: printk would recurse into the TTY path under study. */
+	/* C3-A rev2: type-3 events removed from the ring — at ~100/s they
+	 * wrapped the 256-entry buffer before any dump, drowning the lock
+	 * events. Atomic-yield volume is already established (1003/71s). */
+	(void)0;
 	// K5: bounded self-resume yield; the authority event loop breathes and
 	// resumes this same task after the deadline.
 	kwa_context_suspend(&ctx, KWA_YIELD_RELAX,

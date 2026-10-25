@@ -1539,6 +1539,9 @@ static struct linux_binprm *alloc_bprm(int fd, struct filename *filename)
 	if (!bprm)
 		goto out;
 
+	/* Z1-F11-C4-D diag: log the requested exec path (ENOENT anomaly probe). */
+	pr_info("Z1EXEC|%s\n", filename->name);
+
 	if (fd == AT_FDCWD || filename->name[0] == '/') {
 		bprm->filename = filename->name;
 	} else {

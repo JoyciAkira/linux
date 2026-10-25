@@ -1,6 +1,7 @@
 extra-y := vmlinux.lds
 
 obj-y += \
+	z1_lockdiag.o \
 	binfmt_wasm.o \
 	cpuinfo.o \
 	early_printk.o \

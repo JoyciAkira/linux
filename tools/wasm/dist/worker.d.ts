@@ -1,3 +1,4 @@
+import { type EntryPacket } from "./util.ts";
 import { type D1Record, type D1RingMetadata } from "./d1-ring-buffer.ts";
 export interface InitMessage {
     fn: number;
@@ -23,11 +24,15 @@ export interface InitMessage {
     /** K5: KERNEL-OWNED task token this user worker executes for. Sent with
      * every broker request as the routing key (kernel truth still stamped C-side). */
     taskToken?: number;
-    /** K5: user entry mode — "start": image entrypoint; "switch_entry": CLONE_VM
-     * table entry; "fork_user": fresh-memory fork resume with fork-ack. */
-    mode?: "start" | "switch_entry" | "fork_user";
     /** K5: real child pid for fork_user fork-ack (kernel fork_copied export). */
     forkPid?: number;
+    /** Kernel-owned argument snapshot; pointers remain based at argsBaseAddr. */
+    argsBytes?: Uint8Array;
+    argsBaseAddr?: number;
+    args?: string[];
+    entry?: EntryPacket;
+    /** Start-stripped module for thread children (CLONE_VM). */
+    user_module_noinit?: WebAssembly.Module;
 }
 export type WorkerMessage = {
     type: "spawn_worker";
@@ -38,15 +43,20 @@ export type WorkerMessage = {
     user_memory: WebAssembly.Memory | null;
     parent_tls_base?: number;
     brokerSab?: SharedArrayBuffer;
-    workerId?: number;
+    workerId: number;
     /** K5A: kernel authority workers bypass K4 secondary-worker gate. */
     isKernelAuthority?: boolean;
     /** K5: authority-originated spawn — KERNEL-OWNED task token + entry mode.
      * When workerId is present the authority assigned it (registry-bound);
      * main MUST use it instead of allocating its own. */
-    taskToken?: number;
-    mode?: "start" | "switch_entry" | "fork_user";
+    taskToken: number;
+    entry: EntryPacket;
     forkPid?: number;
+    argsBytes?: Uint8Array;
+    argsBaseAddr?: number;
+    args?: string[];
+    /** Start-stripped module for thread children (CLONE_VM). */
+    user_module_noinit?: WebAssembly.Module;
 } | {
     type: "boot_console_write";
     message: ArrayBuffer;
@@ -94,6 +104,7 @@ export type WorkerMessage = {
     type: "user_task_error";
     taskToken: number;
     reason: string;
+    stack?: string;
     faultClass: "wasm_trap" | "returned_without_exit";
 }
 /** K5: main → authority: fork ack relay (from a user worker's fork_copied). */
@@ -124,6 +135,21 @@ export type WorkerMessage = {
     type: "authority_broker_kick";
 } | {
     type: "k5a_ping";
+} | {
+    type: "r1b_provenance";
+    className: string;
+    id: number;
+    features: string;
+    configBytes: number;
+    hasVirtioConsoleConfig: boolean;
+    ts: number;
+}
+/** Authority → main: retire a user worker after TASK_DEAD or exec supersession. */
+ | {
+    type: "retire_worker";
+    workerId: number;
+    taskToken: number;
+    imageId: bigint;
 };
 /** K5: virtio device operations relayed authority→main. */
 export type VirtioOp = "set_features" | "setup" | "enable_vring" | "disable_vring" | "notify";
@@ -139,3 +165,4 @@ export interface AuthorityDiagMessage {
     ts: number;
 }
 export declare function exportD1Trace(): void;
+//# sourceMappingURL=worker.d.ts.map

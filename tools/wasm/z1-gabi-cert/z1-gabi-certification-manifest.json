@@ -1,0 +1,106 @@
+{
+ "schema": "z1-gabi-certification-manifest-v1",
+ "timestamp": "2026-10-07T18:30:16.853933+00:00",
+ "sourceRepository": "JoyciAkira/linux",
+ "sourceBranch": "fix/kwa-v2.1-z1-gabi",
+ "sourceCommit": "82d45715a3dd0ef6a978fc592afdad09a1ca4f99",
+ "lineage": {
+  "PREDECESSOR_BRANCH": "fix/kwa-single-authority-v2",
+  "PREDECESSOR_COMMIT": "68e31c63ef3a567029d218e990250a1b4a0b5b3d",
+  "BASELINE_KERNEL_SHA": "bbe4f538087179597bdfc31dbce672fcc34c16443f629bf222f8c7e616e829c1",
+  "BASELINE_REWRITTEN": false,
+  "SUCCESSOR_REASON": "REAL_LINUX_GUEST_ABI"
+ },
+ "kernel": {
+  "path": "tools/wasm/vmlinux.wasm",
+  "sha256": "89524964cb9b31d67a8237c7f3ffd1559f60b4a7840e958a350a7e1696ed02e8",
+  "changes": [
+   "sys_z1_get_args (arch-specific NR 245, compact argv/envp layout)",
+   "sys_z1_get_thread_area (NR 246)",
+   "WASM_EXEC_COMMITTED data0 = exec_seq<<32|pid (kernel-authorized image identity)"
+  ]
+ },
+ "dist": {
+  "path": "tools/wasm/dist/worker.js",
+  "sha256": "04b1ebbe88c44fa3cae8a708a0216fb51527f44dd6072ffb82ce07db5f353960",
+  "changes": [
+   "user.call identity/post-exit guards",
+   "activeImageId stale-window rejection",
+   "strict import contract (instantiation-time fail-closed)",
+   "pidToToken + EXEC_COMMITTED imageId binding (non-consuming)"
+  ]
+ },
+ "certificationRuns": [
+  {
+   "run": 1,
+   "receiptPath": "z1-gabi-cert/z1-gabi-clean-run-1-receipt.json",
+   "sha256": "daa0c720fcfd015a90cbb71c32be4276bfdcb9ad8370e87995ec050c61001f54",
+   "verdict": "PASS",
+   "sourceTreeStatusBeforeRun": "clean",
+   "RUN_ID": "aa07313fd2f06daa2341cc5f71faefe1",
+   "INIT_ARGC": 1,
+   "APP_EXIT_CODE": 7,
+   "IMAGE_BOUND_EVENTS": 2,
+   "checksAllTrue": true
+  },
+  {
+   "run": 2,
+   "receiptPath": "z1-gabi-cert/z1-gabi-clean-run-2-receipt.json",
+   "sha256": "1cec53ae76cc2ff5b150f6077cf150f57e2f27bbda583585bf0051e2ad3465ef",
+   "verdict": "PASS",
+   "sourceTreeStatusBeforeRun": "clean",
+   "RUN_ID": "34d84cebaa66e6cd1ceb3d4240910c50",
+   "INIT_ARGC": 1,
+   "APP_EXIT_CODE": 7,
+   "IMAGE_BOUND_EVENTS": 2,
+   "checksAllTrue": true
+  },
+  {
+   "run": 3,
+   "receiptPath": "z1-gabi-cert/z1-gabi-clean-run-3-receipt.json",
+   "sha256": "77f6f18c9ab942b08c28d6849914477cb6c7d2cab9204c593c1bdcb15b50ab8b",
+   "verdict": "PASS",
+   "sourceTreeStatusBeforeRun": "clean",
+   "RUN_ID": "6dc2337881ff74125ac2018e8e684ae4",
+   "INIT_ARGC": 1,
+   "APP_EXIT_CODE": 7,
+   "IMAGE_BOUND_EVENTS": 2,
+   "checksAllTrue": true
+  }
+ ],
+ "allPassed": true,
+ "Z1_GABI_RUN_COUNT": 3,
+ "Z1_GABI_RUN_PASS_COUNT": 3,
+ "regressions": {
+  "K1": "PASS (exit 0)",
+  "K2": "PASS (receipt in-tree from prior full series; exit 0 here)",
+  "K4": "PASS (exit 0)",
+  "K5": {
+   "verdict": "PASS",
+   "receipt": "z1-gabi-cert/z1-regression-k5-receipt.json"
+  },
+  "K6R1": {
+   "verdict": "PASS",
+   "receipt": "z1-gabi-cert/z1-regression-k6r1-receipt.json",
+   "note": "trap containment re-proven on successor kernel: status 11, TASK_DEAD, storm 10/10"
+  }
+ },
+ "acceptance": {
+  "Z1_GABI_REAL_ARGV": "PASS",
+  "Z1_GABI_REAL_TLS": "PASS",
+  "Z1_GABI_IMAGE_ID_FROM_EXEC": "PASS",
+  "Z1_GABI_CLONE_IMAGE_INHERITANCE": "PASS (implementation + regression K5)",
+  "Z1_GABI_EXEC_REBIND": "PASS (IMAGE_BOUND on exec'd child + enforcement active)",
+  "Z1_GABI_EXIT_RETIRE": "SPECIFIED/STRUCTURAL (TaskRecord retirement; explicit gate pending)",
+  "Z1_GABI_WRONG_TASK_REJECT": "PASS (host guard, diag-verified)",
+  "Z1_GABI_STALE_IMAGE_REJECT": "PASS (host guard, exec-window)",
+  "Z1_GABI_POST_EXIT_REJECT": "PASS (host guard + structural)",
+  "Z1_GABI_ZERO_PLACEHOLDERS": "PENDING (successor get_args real; get_thread_area placeholder remains until v2.1 TLS service)",
+  "Z1_GABI_IMPORT_CONTRACT": "PASS (instantiation-time fail-closed)"
+ },
+ "execution": "Three independent Node processes against the PRISTINE worktree at the source commit (git worktree, porcelain clean, receipts written outside the tree). Every run: /init reads kernel-provided argv (argc=1), TLS roundtrip exact, forks child via clone-with-fn, child execve('/app',3-argv) \u2014 first broker-execve of a wasm binary \u2014 /app verifies argc==3 and recognizable argv[1], TLS roundtrip, exits 7 (raw wait status 1792). Two EXEC_COMMITTED imageId bindings observed per run.",
+ "nextGates": [
+  "HUSH_REACHED",
+  "BLINK_NODE_VERSION_EXIT"
+ ]
+}

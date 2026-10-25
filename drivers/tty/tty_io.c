@@ -910,6 +910,7 @@ static ssize_t tty_read(struct kiocb *iocb, struct iov_iter *to)
 	struct inode *inode = file_inode(file);
 	struct tty_struct *tty = file_tty(file);
 	struct tty_ldisc *ld;
+	pr_info("Z1T\n");
 
 	if (tty_paranoia_check(tty, inode, "tty_read"))
 		return -EIO;
@@ -965,6 +966,7 @@ static inline ssize_t do_tty_write(
 	unsigned int chunk;
 
 	ret = tty_write_lock(tty, file->f_flags & O_NDELAY);
+	pr_info("Z1k2 %d\n", (int)ret);
 	if (ret < 0)
 		return ret;
 
@@ -1071,7 +1073,8 @@ static ssize_t file_tty_write(struct file *file, struct kiocb *iocb, struct iov_
 {
 	struct tty_struct *tty = file_tty(file);
 	struct tty_ldisc *ld;
-	ssize_t ret;
+		ssize_t ret;
+	pr_info("Z1T2\n");
 
 	if (tty_paranoia_check(tty, file_inode(file), "tty_write"))
 		return -EIO;
@@ -1927,6 +1930,7 @@ static struct tty_driver *tty_lookup_driver(dev_t device, struct file *filp,
 #endif
 	case MKDEV(TTYAUX_MAJOR, 1): {
 		struct tty_driver *console_driver = console_device(index);
+		pr_info("Z1D %s\n", console_driver ? console_driver->name : "NULL");
 		if (console_driver) {
 			driver = tty_driver_kref_get(console_driver);
 			if (driver && filp) {
@@ -2195,6 +2199,7 @@ static __poll_t tty_poll(struct file *filp, poll_table *wait)
 	struct tty_struct *tty = file_tty(filp);
 	struct tty_ldisc *ld;
 	__poll_t ret = 0;
+	pr_info("Z1Q\n");
 
 	if (tty_paranoia_check(tty, file_inode(filp), "tty_poll"))
 		return 0;

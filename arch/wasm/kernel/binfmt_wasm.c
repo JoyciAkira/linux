@@ -7,6 +7,7 @@
 #include <linux/ptrace.h>
 #include <linux/syscalls.h>
 #include <asm/process_events.h>
+#include <asm/globals.h>
 
 static int load_wasm_binary(struct linux_binprm *bprm);
 
@@ -89,6 +90,32 @@ __attribute__((export_name("get_args_length"))) int get_args_length(void)
 	return args ? sizeof(*args) + args->len : -EINVAL;
 }
 
+/* Z1-F11-S1: NON-destructive raw argv read for the host authority.
+ * Unlike get_args() (kfree + NULL + pointer rebasing), this copies the
+ * exec'd task's wasm_process_args block VERBATIM into the caller's buffer
+ * (the reserved authority scratch region — flat-space memcpy, no
+ * copy_to_user, no allocation, no sleeping). Safe to call synchronously
+ * from JS while other continuations are parked: pure read, no kernel
+ * stacks touched. Token-addressed so it never depends on `current`. */
+__attribute__((export_name("z1_read_args_raw"))) int
+z1_read_args_raw(u32 token, void *buf, int len)
+{
+	struct kwa_task_slot *slot = kwa_task_lookup(token);
+	struct wasm_process_args *args;
+	size_t total;
+
+	if (!slot || !slot->task)
+		return -EINVAL;
+	args = task_thread_info(slot->task)->args;
+	if (!args)
+		return -EINVAL;
+	total = sizeof(*args) + args->len;
+	if (len < 0 || (size_t)len < total)
+		return -ENOBUFS;
+	memcpy(buf, args, total);
+	return (int)total;
+}
+
 __attribute__((export_name("get_args"))) int get_args(void *buf)
 {
 	struct wasm_process_args *args = current_thread_info()->args;
@@ -162,9 +189,15 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 
 	finalize_exec(bprm);
 
-	/* SR0.10: Emit WASM_EXEC_COMMITTED event after exec finalized */
+	/* SR0.10 / Z1-GABI: Emit WASM_EXEC_COMMITTED after exec finalized.
+	 * data0 = kernel-authorized image identity: a monotonically increasing
+	 * per-boot exec sequence combined with the exec'd pid. The host derives
+	 * TaskRecord.imageId from this field — syscall/dispatch generations are
+	 * NEVER reused for it (z1-gabi-contract-v1.1 §3). */
 	{
+		static atomic_t z1_exec_seq = ATOMIC_INIT(0);
 		u64 run_id_hi, run_id_lo;
+		u32 seq = (u32)atomic_inc_return(&z1_exec_seq);
 		zn_get_run_id(&run_id_hi, &run_id_lo);
 		wasm_kernel_process_event(
 			ZN_EVENT_WASM_EXEC_COMMITTED,
@@ -175,8 +208,8 @@ static int load_wasm_binary(struct linux_binprm *bprm)
 			current->tgid,
 			current->parent->pid,
 			0, /* worker_id: unused for exec event */
-			0, /* data0: reserved */
-			0, /* data1: reserved */
+			((u64)seq << 32) | (u32)current->pid, /* data0: image identity */
+			(u64)(uintptr_t)current_thread_info()->args, /* data1: args block ptr (Z1-F11-S1) */
 			current->comm,
 			strnlen(current->comm, sizeof(current->comm))
 		);

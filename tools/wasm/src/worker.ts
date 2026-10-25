@@ -1,12 +1,12 @@
-import { assert } from "./util.ts";
+import { assert, validateEntry, type EntryPacket } from "./util.ts";
 import {
   HALT_KERNEL,
   type Imports,
-  type Instance,
   kernel_imports,
   TERMINAL_TASK_EXIT,
   USER_IMAGE_REPLACED,
   YIELD_REASON_IDLE,
+  YIELD_REASON_SWITCH,
 } from "./wasm.ts";
 import { D1RingBuffer, type D1Record, type D1RingMetadata } from "./d1-ring-buffer.ts";
 import { wrapSyscall } from "./d1-syscall-wrapper.ts";
@@ -18,6 +18,7 @@ import {
   S,
   STATE,
 } from "./kwa-broker.ts";
+
 
 export interface InitMessage {
   fn: number;
@@ -45,11 +46,15 @@ export interface InitMessage {
   /** K5: KERNEL-OWNED task token this user worker executes for. Sent with
    * every broker request as the routing key (kernel truth still stamped C-side). */
   taskToken?: number;
-  /** K5: user entry mode — "start": image entrypoint; "switch_entry": CLONE_VM
-   * table entry; "fork_user": fresh-memory fork resume with fork-ack. */
-  mode?: "start" | "switch_entry" | "fork_user";
   /** K5: real child pid for fork_user fork-ack (kernel fork_copied export). */
   forkPid?: number;
+  /** Kernel-owned argument snapshot; pointers remain based at argsBaseAddr. */
+  argsBytes?: Uint8Array;
+  argsBaseAddr?: number;
+  args?: string[];
+  entry?: EntryPacket;
+  /** Start-stripped module for thread children (CLONE_VM). */
+  user_module_noinit?: WebAssembly.Module;
 }
 export type WorkerMessage =
   | {
@@ -61,15 +66,20 @@ export type WorkerMessage =
     user_memory: WebAssembly.Memory | null;
     parent_tls_base?: number;
     brokerSab?: SharedArrayBuffer;
-    workerId?: number;
+    workerId: number;
     /** K5A: kernel authority workers bypass K4 secondary-worker gate. */
     isKernelAuthority?: boolean;
     /** K5: authority-originated spawn — KERNEL-OWNED task token + entry mode.
      * When workerId is present the authority assigned it (registry-bound);
      * main MUST use it instead of allocating its own. */
-    taskToken?: number;
-    mode?: "start" | "switch_entry" | "fork_user";
+    taskToken: number;
+    entry: EntryPacket;
     forkPid?: number;
+    argsBytes?: Uint8Array;
+    argsBaseAddr?: number;
+    args?: string[];
+    /** Start-stripped module for thread children (CLONE_VM). */
+    user_module_noinit?: WebAssembly.Module;
   }
   | { type: "boot_console_write"; message: ArrayBuffer }
   | { type: "boot_console_close" }
@@ -101,7 +111,7 @@ export type WorkerMessage =
   | { type: "fork_copied"; pid: number; taskToken: number }
   /** K5: user worker ended abnormally (image returned without exit / trap);
    * the authority rejects that task's user.call with the real error. */
-  | { type: "user_task_error"; taskToken: number; reason: string; faultClass: "wasm_trap" | "returned_without_exit" }
+  | { type: "user_task_error"; taskToken: number; reason: string; stack?: string; faultClass: "wasm_trap" | "returned_without_exit" }
   /** K5: main → authority: fork ack relay (from a user worker's fork_copied). */
   | { type: "authority_fork_copied"; pid: number }
   /** K5: main → authority: device IRQ relay — deliver through the kernel. */
@@ -110,7 +120,10 @@ export type WorkerMessage =
   | { type: "virtio_cmd"; seq: number; dev: number; op: VirtioOp; args: number[]; features?: bigint }
   | { type: "virtio_result"; seq: number; ok: boolean; value: number }
   | { type: "authority_broker_kick" }
-  | { type: "k5a_ping" };
+  | { type: "k5a_ping" }
+  | { type: "r1b_provenance"; className: string; id: number; features: string; configBytes: number; hasVirtioConsoleConfig: boolean; ts: number }
+  /** Authority → main: retire a user worker after TASK_DEAD or exec supersession. */
+  | { type: "retire_worker"; workerId: number; taskToken: number; imageId: bigint };
 
 /** K5: virtio device operations relayed authority→main. */
 export type VirtioOp =
@@ -141,7 +154,9 @@ type K4DiagStage =
  | "BEFORE_ENTRYPOINT_CALL"
  | "BEFORE_LINUX_SYSCALL"
  | "AFTER_LINUX_SYSCALL"
- | "TOP_LEVEL_FATAL";
+ | "TOP_LEVEL_FATAL"
+ // Z1-GABI (v1.1): strict import contract diagnostics
+ | "Z1_GABI_IMPORT_REJECTED";
 
 function postK4Diag(stage: K4DiagStage, detail?: Record<string, unknown>): void {
  try {
@@ -164,6 +179,8 @@ export interface AuthorityDiagMessage {
   ts: number;
 }
 
+let sampledDiagnosticCount = 0;
+
 function postK5Diag(
   stage: string,
   ok: boolean,
@@ -172,6 +189,12 @@ function postK5Diag(
     string | number | boolean | null | WebAssembly.Memory
   >,
 ): void {
+  // Bound hot progress messages; failures and lifecycle evidence are never sampled.
+  if (ok && (stage === "KERNEL_YIELD" || stage === "Z1VIRTIO_CMD_POSTED" ||
+      stage === "Z1VIRTIO_RESULT" || stage === "TASK_RESUMED" ||
+      stage === "TASK_STARTED" || stage === "SUSPENSIONS_WOKE")) {
+    if (++sampledDiagnosticCount % 4096 !== 1) return;
+  }
   postMessage({ type: "authority_diag", stage, ok, detail, ts: performance.now() });
 }
 
@@ -183,15 +206,12 @@ let authorityHandlers: {
   forkCopied: (pid: number) => void;
   irq: (cpu: number, irq: number) => void;
   virtioResult: (seq: number, ok: boolean, value: number) => void;
-  userTaskError: (taskToken: number, reason: string, faultClass: "wasm_trap" | "returned_without_exit") => void;
+  userTaskError: (taskToken: number, reason: string, stack: string, faultClass: "wasm_trap" | "returned_without_exit") => void;
 } | null = null;
 
 function isInitMessage(data: unknown): data is InitMessage {
   return !(typeof data === "object" && data !== null && "type" in data);
 }
-const unavailable = () => {
-  throw new Error("not available on worker thread");
-};
 
 const postMessage = self.postMessage as (message: WorkerMessage) => void;
 
@@ -222,438 +242,164 @@ export function exportD1Trace(): void {
   const metadata = d1TraceBuffer.getMetadata();
   postMessage({ type: "d1_trace_export", runId: d1RunId, records, metadata });
 }
-
-function user_imports({
-  kernel_memory,
-  get_kernel_instance,
-  parent_user_module: parent_module,
-  parent_user_memory: parent_memory,
-  parent_tls_base,
-  brokerSab,
-  workerId,
-  taskToken,
-}: {
-  kernel_memory: WebAssembly.Memory;
-  get_kernel_instance: () => Instance;
-  parent_tls_base: number;
-  parent_user_module: WebAssembly.Module | null;
-  parent_user_memory: WebAssembly.Memory | null;
-  brokerSab?: SharedArrayBuffer;
-  workerId?: number;
-  /** K5: KERNEL-OWNED task token — sent as the broker request routing key. */
-  taskToken?: number;
-}): {
-  module: WebAssembly.Module | null;
-  memory: WebAssembly.Memory | null;
-  instance: WebAssembly.Instance | null;
-  doInstantiate: () => void;
-  imports: Imports["user"];
-} {
-  const HALT_USER = Symbol("halt user");
-
-  const kernel_memory_buffer = new Uint8Array(kernel_memory.buffer);
-  let module: WebAssembly.Module | null = null;
-  let parentTlsBase = 0;
-  let instance: WebAssembly.Instance | null = null;
-  let memory: WebAssembly.Memory | null = null;
-
-  function call_start(): void {
-    assert(instance);
-    const { _start } = instance.exports;
-    assert(typeof _start === "function", "_start not found");
-    // K5 guests export _start(param i32); extra args are ignored by the JS API
-    // for 0-param starts, so 0 satisfies both signatures.
-    _start(0);
-    throw new Error("_start reached the end without exiting");
+/** Z1-G6-THREADS: compile a start-stripped variant of the user image for
+ * thread children (CLONE_VM). The full module's __wasm_init_memory start
+ * section re-applies passive data segments into the SHARED parent VAS at
+ * every instantiation, transiently clobbering the parent's live .data while
+ * the parent keeps running. For a CLONE_VM child the parent's live image IS
+ * the initialized data — nothing may be re-applied. This helper strips the
+ * start section from the same bytes so the noinit module is identity-bound
+ * to the original (same compilation unit, same type/function indices). */
+function compileContinuationImage(bytes: Uint8Array): WebAssembly.Module {
+  const chunks: Uint8Array[] = [bytes.subarray(0, 8)];
+  let pos = 8;
+  let length = 8;
+  const uleb = (): number => {
+    let value = 0, shift = 0, byte: number;
+    do {
+      assert(pos < bytes.length && shift <= 28, "Malformed Wasm section length");
+      byte = bytes[pos++]!;
+      value += (byte & 127) * 2 ** shift;
+      shift += 7;
+    } while (byte & 128);
+    return value;
+  };
+  while (pos < bytes.length) {
+    const start = pos;
+    const id = bytes[pos++]!;
+    const size = uleb();
+    const end = pos + size;
+    assert(end <= bytes.length, "Truncated Wasm section");
+    if (id !== 8) {
+      chunks.push(bytes.subarray(start, end));
+      length += end - start;
+    }
+    pos = end;
   }
-  let call_entry = call_start;
+  const output = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return new WebAssembly.Module(output);
+}
 
-  // M115: apply the parent's TLS base to a freshly instantiated clone/thread
-  // instance so _Thread_local accesses land on the shared TLS block.
-  const applyTlsBase = () => {
-    if (!instance || !parent_tls_base) return;
-    const g = (instance.exports as Record<string, any>).__tls_base;
-    if (g && typeof g === "object" && "value" in g) g.value = parent_tls_base;
-  };
 
+function createGuestImports(data: InitMessage, entry: EntryPacket): WebAssembly.Imports {
+  const memory = data.parent_user_memory;
+  assert(memory && data.brokerSab && data.workerId && data.taskToken,
+    "Secondary worker missing task-bound memory or broker");
+  assert(Array.isArray(data.args), "Missing kernel argv snapshot");
+  const { workerId, taskToken, argsBytes, argsBaseAddr } = data;
+  const broker = new BrokerClient(data.brokerSab, workerId);
+  const invoke = (nr: number, a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0) =>
+    broker.invoke(nr, a0, a1, a2, a3, a4, a5, taskToken, 0,
+      () => postMessage({ type: "broker_kick", workerId }));
+  let tlsBase = entry.type === "START_PROCESS" ? 0 : data.parent_tls_base;
 
-  // shared instantiation body; fall back to the parent's module/memory
-  // when this worker has not exec'd its own program (fork child).
-  const doInstantiate = () => {
-    assert(module);
+  const encoder = new TextEncoder();
+  const encodedArgs = data.args.map(arg => encoder.encode(arg + "\0"));
+  const encodedEnv: Uint8Array[] = [];
+  if (argsBytes && argsBaseAddr !== undefined) {
+    const raw = new DataView(argsBytes.buffer, argsBytes.byteOffset, argsBytes.byteLength);
+    const envc = raw.getInt32(4, true);
+    const table = raw.getUint32(16, true) - argsBaseAddr;
+    assert(envc >= 0 && table >= 20 && table + (envc + 1) * 4 <= argsBytes.length,
+      "Invalid kernel environment table");
+    for (let i = 0; i < envc; i++) {
+      const start = raw.getUint32(table + i * 4, true) - argsBaseAddr;
+      assert(start >= 20 && start < argsBytes.length, "Invalid kernel environment pointer");
+      const end = argsBytes.indexOf(0, start);
+      assert(end !== -1, "Unterminated kernel environment");
+      encodedEnv.push(argsBytes.slice(start, end + 1));
+    }
+  }
+  const argc = encodedArgs.length;
+  const envc = encodedEnv.length;
+  const stringBytes = encodedArgs.reduce((size, arg) => size + arg.length, 0) +
+    encodedEnv.reduce((size, env) => size + env.length, 0);
+  const argvOffset = 20;
+  const envpOffset = argvOffset + (argc + 1) * 4;
+  const stringsOffset = envpOffset + (envc + 1) * 4 + 16;
+  const argsLength = stringsOffset + stringBytes;
 
-    if (!memory) {
-      const initial = 12288; // 768 MiB
-      const maximum = 32768; // 2 GiB tetto
-      memory = new WebAssembly.Memory({ initial, maximum, shared: true });
-      if (d1TraceEnabled) {
-        d1TraceBuffer.recordLifecycle("wasm_memory_constructed", d1RunId, {
-          detail: `initial=${initial} maximum=${maximum}`,
-        });
+  const copyRawArgs = (address: number, capacity: number): number => {
+    const dst = address >>> 0;
+    if (!argsBytes || argsBaseAddr === undefined) return -22;
+    if (!dst || capacity < argsBytes.length ||
+        dst > memory.buffer.byteLength - argsBytes.length) return -14;
+    new Uint8Array(memory.buffer, dst, argsBytes.length).set(argsBytes);
+    const view = new DataView(memory.buffer, dst, argsBytes.length);
+    const delta = dst - argsBaseAddr;
+    const rebase = (field: number, count: number) => {
+      const oldTable = view.getUint32(field, true);
+      const offset = oldTable - argsBaseAddr;
+      assert(count >= 0 && offset >= 20 && offset + (count + 1) * 4 <= argsBytes.length,
+        "Invalid kernel argument pointer table");
+      view.setUint32(field, oldTable + delta, true);
+      for (let i = 0; i < count; i++) {
+        const pointer = view.getUint32(offset + i * 4, true);
+        view.setUint32(offset + i * 4, pointer ? pointer + delta : 0, true);
       }
-    }
-
-    // K4: Secondary workers MUST NOT access kernel instance directly.
-    // All syscalls route through broker SAB; non-syscall imports are stubbed.
-    const isBrokerOnly = (() => {
-      try { get_kernel_instance(); return false; } catch { return true; }
-    })();
-
-    if (isBrokerOnly) {
-      // Broker-only path: route syscalls through shared SAB to single kernel authority
-      // brokerSab and workerId must be available from InitMessage (set in onmessage scope)
-      if (typeof brokerSab === "undefined" || typeof workerId === "undefined") {
-        throw new Error("[K4] secondary worker missing brokerSab or workerId in InitMessage");
-      }
-      const brokerClient = new BrokerClient(brokerSab, workerId);
-
-      const originalSyscallHandler = (
-        nr: number, arg0: number, arg1: number, arg2: number,
-        arg3: number, arg4: number, arg5: number,
-      ): number => {
-        return brokerClient.invoke(nr, arg0, arg1, arg2, arg3, arg4, arg5, taskToken ?? 0, 0, () => {
-          postMessage({ type: "broker_kick", workerId });
-        }).result;
-      };
-
-      const wrappedSyscallHandler = wrapSyscall(originalSyscallHandler, {
-        buffer: d1TraceBuffer,
-        runId: d1RunId,
-        enabled: d1TraceEnabled,
-        processId: `worker-${self.name || "unknown"}`,
-        getThreadId: () => 0,
-      });
-
-      instance = new WebAssembly.Instance(module, {
-        env: { memory },
-        linux: {
-          syscall: wrappedSyscallHandler,
-          // Z1-GABI NOTE: these three are part of the FROZEN kernel ABI
-          // (bbe4f538 calls them synchronously during guest task setup).
-          // `() => 0` is load-bearing (empty argv / no TLS) until the
-          // kernel-side argv/TLS service lands; making them throw breaks
-          // every guest boot. Real values are a kernel-rebuild step.
-          get_thread_area: () => 0,
-          get_args_length: () => 0,
-          get_args: () => 0,
-          arch_wasm_poll: () => 0,
-        },
-      });
-    } else {
-      // Boot worker path: direct kernel access (unchanged from pre-K4)
-      const kernel_instance = get_kernel_instance();
-      const originalSyscallHandler = (
-        nr: number, arg0: number, arg1: number, arg2: number,
-        arg3: number, arg4: number, arg5: number,
-      ): number => {
-        const original_instance = instance;
-        let ret: number;
-        try {
-          ret = kernel_instance.exports.syscall(nr, arg0, arg1, arg2, arg3, arg4, arg5);
-        } catch (error) {
-          if (error === HALT_KERNEL) throw error;
-          throw error;
-        }
-        if (instance !== original_instance) {
-          call_entry = call_start;
-          throw HALT_USER;
-        }
-        return ret;
-      };
-
-      const wrappedSyscallHandler = wrapSyscall(originalSyscallHandler, {
-        buffer: d1TraceBuffer,
-        runId: d1RunId,
-        enabled: d1TraceEnabled,
-        processId: `worker-${self.name || "unknown"}`,
-        getThreadId: () => 0,
-      });
-
-      instance = new WebAssembly.Instance(module, {
-        env: { memory },
-        linux: {
-          syscall: wrappedSyscallHandler,
-          get_thread_area: kernel_instance.exports.get_thread_area,
-          get_args_length: kernel_instance.exports.get_args_length,
-          get_args: kernel_instance.exports.get_args,
-          arch_wasm_poll: kernel_instance.exports.arch_wasm_poll,
-        },
-      });
-    }
-
-    if ("memory" in instance.exports) {
-      assert(instance.exports.memory instanceof WebAssembly.Memory);
-      memory = instance.exports.memory;
-    }
-    if (d1TraceEnabled) {
-      d1TraceBuffer.recordLifecycle("kernel_module_instantiated", d1RunId);
-    }
+    };
+    rebase(12, view.getInt32(8, true));
+    rebase(16, view.getInt32(4, true));
+    return 0;
   };
-
+  const syscall = wrapSyscall(
+    (nr: number, a0: number, a1: number, a2: number, a3: number, a4: number, a5: number) => {
+      if (nr === 245) return copyRawArgs(a0, a1);
+      const result = invoke(nr, a0, a1, a2, a3, a4, a5);
+      if (result.cancelled) throw TERMINAL_TASK_EXIT;
+      if (nr === 244 && result.result === 0) tlsBase = a0 >>> 0;
+      if (nr === 93 || nr === 94)
+        throw new Error("Linux exit unexpectedly returned without task retirement");
+      return result.result;
+    },
+    {
+      buffer: d1TraceBuffer, runId: d1RunId, enabled: d1TraceEnabled,
+      processId: `worker-${workerId}`, getThreadId: () => 0,
+    },
+  );
   return {
-    get module() {
-      return module;
-    },
-    set module(m: WebAssembly.Module | null) {
-      module = m;
-    },
-    get memory() {
-      return memory;
-    },
-    set memory(m: WebAssembly.Memory | null) {
-      memory = m;
-    },
-    get instance() {
-      return instance;
-    },
-    doInstantiate,
-    imports: {
-      // program management:
-      compile(buf, size) {
-        const bytes = new Uint8Array(
-          kernel_memory_buffer.slice(buf, buf + size),
-        );
-        try {
-          module = new WebAssembly.Module(bytes);
-          return 0;
-        } catch {
-          return -8; // exec format error
+    env: { memory },
+    linux: {
+      syscall,
+      get_thread_area: () => {
+        if (tlsBase === undefined) {
+          const result = invoke(246);
+          assert(result.errno === 0 && result.result !== -1, "Kernel TP unavailable");
+          tlsBase = result.result >>> 0;
         }
+        return tlsBase;
       },
-      instantiate(fresh_memory) {
-        if (!module && parent_module) module = parent_module;
-        // M115 CLONE_VM threads: instantiation rewrites .data defaults over
-        // the SHARED live memory, corrupting the parent's runtime globals.
-        // Snapshot/restore the .data window around it (blink links ≤2MB).
-        const threadShared = !fresh_memory && parent_memory && memory === parent_memory;
-        const snap = threadShared && memory ? memory.buffer.slice(0, 2 * 1024 * 1024) : null;
-        if (fresh_memory && memory) {
-          // caller explicitly wants a fresh memory: recreate it
-          const initial = 12288; // 768 MiB iniziali
-          const maximum = 32768; // 2 GiB tetto
-          memory = new WebAssembly.Memory({ initial, maximum, shared: true });
-          if (d1TraceEnabled) {
-            d1TraceBuffer.recordLifecycle("wasm_memory_constructed", d1RunId, {
-              detail: `initial=${initial} maximum=${maximum}`,
-            });
-          }
-        }
-        doInstantiate();
-        if (snap && memory) {
-          new Uint8Array(memory.buffer).set(new Uint8Array(snap), 0);
-        }
-      },
-      call() {
-        if (d1TraceEnabled) {
-          d1TraceBuffer.recordLifecycle("kernel_start_called", d1RunId);
-        }
-        for (;;) {
-          try {
-            call_entry();
-          } catch (error) {
-            if (error === HALT_USER) {
-              if (d1TraceEnabled) {
-                d1TraceBuffer.recordLifecycle("halt_user_observed", d1RunId);
-              }
-              continue;
-            }
-            if (error === HALT_KERNEL) throw error;
-            // G12: discriminate kernel do_task_dead (clean thread exit) from real errors.
-            // do_task_dead is the kernel's thread-end sentinel — it uses unreachable intentionally
-            // after sys_exit_group completes. This is NOT an error.
-            if (
-              error instanceof Error &&
-              error.name === "RuntimeError" &&
-              error.message.includes("unreachable")
-            ) {
-              const stack = (error as Error).stack || "";
-              if (stack.includes("do_task_dead")) {
-                // Clean kernel thread death — treat as HALT_USER, continue event loop
-                console.log("[G12-DIAG] do_task_dead clean exit, continuing event loop");
-                continue;
-              }
-              // G12: Do NOT catch user module exit() traps here.
-              // When a user module (lo-up, blink, etc.) calls exit(), musl wasm32's
-              // exit() is an unreachable stub. This trap MUST propagate to the kernel's
-              // task_entry_inner (process.c:134-149), which handles it by calling
-              // do_exit(SIGSEGV) -> full task cleanup -> do_task_dead().
-              // do_task_dead itself uses unreachable, which we catch above as clean exit.
-              // Catching the trap here (at worker level) corrupts kernel scheduler state
-              // because task_entry_inner never completes its cleanup path.
-              // Non-kernel unreachable — log and fall through to error handler
-              console.log("[G12-DIAG] non-kernel unreachable trap, stack:", stack);
-            }
-            console.log("error running user module:", String(error), (error && (error as Error).stack) || "");
-            if (d1TraceEnabled) {
-              d1TraceBuffer.recordRuntimeError(error, d1RunId, {
-                eventType: "runtime_error_caught",
-                activeOperation: "call_entry",
-              });
-              d1TraceBuffer.recordLifecycle("kernel_start_returned", d1RunId, {
-                detail: (error as Error)?.name ?? "error",
-              });
-              exportD1Trace();
-            }
-            return;
-          }
-        }
-      },
-      switch_entry(fn, arg) {
-        // This is called if this thread was created by a clone call,
-        // and therefore we our entrypoint is a user-specified function.
-        // Our custom variant of the clone syscall spawns a worker that calls
-        // switch_entry, then immediately calls instantiate.
-        console.log("[CLONE] switch_entry fn=" + fn + " arg=" + arg + " parent_module=" + !!parent_module + " parent_memory=" + !!parent_memory);
-
-        assert(parent_module);
-        assert(parent_memory);
-
-        module = parent_module;
-        memory = parent_memory;
-
-        call_entry = () => {
-          assert(instance);
-          applyTlsBase();
-
-          const { __indirect_function_table } = instance.exports;
-          assert(
-            __indirect_function_table instanceof WebAssembly.Table,
-            "Invalid function table",
-          );
-
-          const f = __indirect_function_table.get(fn);
-          console.log("[CLONE] resolved fn=" + fn + " -> " + typeof f + " len=" + (f && f.length));
-          assert(
-            typeof f === "function" && f.length === 1,
-            "Invalid function signature",
-          );
-
-          console.log("[CLONE] calling f(" + arg + ")");
-          f(arg);
-          console.log("[CLONE] f returned");
-
-          // throw new Error("thread entrypoint reached the end without exiting");
-          console.warn("thread entrypoint reached the end without exiting");
-        };
-      },
-      // G12/M115 fork-mode child: the kernel child task resumes the parent's
-      // user state. The guest machine copy happens blink-side (blink's fork
-      // path: NewMachine + ax=0 + Blink).
-      //
-      // M115 memory isolation: plain fork (fn==NULL) spawned this worker with a
-      // FRESH WebAssembly.Memory (share_user_memory=false). To give the child a
-      // faithful copy of the parent's VAS we must seed the fresh memory from the
-      // parent's guest memory BEFORE resuming. The parent's guest memory object is
-      // passed as `parent_user_memory`; the fresh child buffer is `memory`.
-      // vfork 0x4111 (CLONE_VM) shares the parent memory and does not go through
-      // fork_user (it uses switch_entry), so this branch is fork-isolated only.
-      fork_user(pid) {
-        console.log("[FORK] child pid=" + pid + " resuming guest pm_mod=" + typeof parent_module + ":" + String(parent_module).slice(0, 40) + " pm_mem=" + typeof parent_memory + ":" + String(parent_memory));
-        // Fork child worker has not exec'd its own program: bind to the
-        // parent's module and instantiate it into a fresh memory, then seed
-        // that memory with the parent's VAS before resuming.
-        if (!module && parent_module) {
-          module = parent_module;
-          console.log("[FORK] using parent_module");
-        }
-        if (!memory || memory === parent_memory) {
-          // Match the parent's guest memory size: the copied Machine pointer
-          // and heap live anywhere in the parent's address space.
-          const parentPages = parent_memory
-            ? Math.ceil(parent_memory.buffer.byteLength / 65536)
-            : 12288;
-          const initial = Math.max(parentPages, 12288);
-          const maximum = 32768; // 2 GiB tetto
-          console.log("[FORK] creating fresh child memory pages=" + initial);
-          memory = new WebAssembly.Memory({ initial, maximum, shared: true });
-          if (d1TraceEnabled) {
-            d1TraceBuffer.recordLifecycle("wasm_memory_constructed", d1RunId, {
-              detail: `fork-child initial=${initial} maximum=${maximum}`,
-            });
-          }
-        }
-        // instantiate the parent's blink module into the fresh child memory
-        doInstantiate();
-
-        if (parent_memory && memory && memory !== parent_memory) {
-          const src = new Uint8Array(parent_memory.buffer);
-          const dst = new Uint8Array(memory.buffer);
-          // Copy the parent's full user VAS (limited to child buffer length).
-          dst.set(src.subarray(0, Math.min(src.length, dst.length)));
-        } else if (!parent_memory && memory) {
-          // No parent guest memory to copy (e.g. boot/idle): keep fresh (zeroed).
-          console.warn(
-            "[FORK] no parent guest memory to copy; child starts from zeroed VAS",
-          );
-        }
-        // Release the parked parent: the VAS snapshot is now complete, so the
-        // parent may resume from its clone return point. K5: the ack travels
-        // fork_copied → main → authority → promising(kernel fork_copied);
-        // secondary workers have no kernel instance (K3) and never call it.
-        postMessage({ type: "fork_copied", pid, taskToken: 0 });
-        // M115 USER_FORK_RESUME: the guest (blink x86 emulator) saved its
-        // Machine* + snapshot in its own .data, which is now copied verbatim
-        // into this fresh child memory. Jump straight to blink's resume
-        // export (reads those globals, rebinds g_machine, restores the x86
-        // continuation with ax=0) instead of re-running _start()/main() —
-        // the fork child carries no argv, so call_start would fail.
-        call_entry = () => {
-          assert(instance);
-          applyTlsBase();
-          const { blink_user_fork_resume } = instance.exports;
-          assert(
-            typeof blink_user_fork_resume === "function",
-            "blink_user_fork_resume not found; not a x86-via-blink guest?",
-          );
-          console.log("[FORK] calling blink_user_fork_resume export");
-          try {
-            const rc = (blink_user_fork_resume as () => number)();
-            throw new Error("blink_user_fork_resume returned rc=" + rc);
-          } catch (e) {
-            console.log("[FORK] resume threw: " + String((e as Error)?.stack || e));
-            throw e;
+      get_args_length: () => argsLength,
+      get_args: (address: number) => {
+        const dst = address >>> 0;
+        if (!dst || dst > memory.buffer.byteLength - argsLength) return -14;
+        const view = new DataView(memory.buffer, dst, argsLength);
+        new Uint8Array(memory.buffer, dst, argsLength).fill(0);
+        view.setUint32(0, stringBytes, true);
+        view.setUint32(4, envc, true);
+        view.setUint32(8, argc, true);
+        view.setUint32(12, dst + argvOffset, true);
+        view.setUint32(16, dst + envpOffset, true);
+        let stringOffset = stringsOffset;
+        const copyStrings = (strings: Uint8Array[], tableOffset: number) => {
+          for (let i = 0; i < strings.length; i++) {
+            const bytes = strings[i]!;
+            view.setUint32(tableOffset + i * 4, dst + stringOffset, true);
+            new Uint8Array(memory.buffer, dst + stringOffset, bytes.length).set(bytes);
+            stringOffset += bytes.length;
           }
         };
+        copyStrings(encodedArgs, argvOffset);
+        copyStrings(encodedEnv, envpOffset);
+        return 0;
       },
-
-      // signal handling:
-      call_signal_handler(fn, sig) {
-        assert(instance);
-
-        const { __indirect_function_table } = instance.exports;
-        assert(
-          __indirect_function_table instanceof WebAssembly.Table,
-          "Invalid function table",
-        );
-
-        const f = __indirect_function_table.get(fn);
-        assert(
-          typeof f === "function" && (f.length === 1 || f.length === 3),
-          "Invalid function signature",
-        );
-
-        if (f.length === 3) f(sig, 0, 0); else f(sig); // SA_SIGINFO: siginfo+ucontext placeholders
-      },
-
-      // memory:
-      read(to, from, n) {
-        assert(memory);
-        const slice = new Uint8Array(memory.buffer, from, n);
-        kernel_memory_buffer.set(slice, to);
-        return n - slice.length;
-      },
-      write(to, from, n) {
-        assert(memory);
-        const slice = kernel_memory_buffer.subarray(from, from + n);
-        new Uint8Array(memory.buffer, to, n).set(slice);
-        return n - slice.length;
-      },
-      write_zeroes(to, n) {
-        assert(memory);
-        const slice = new Uint8Array(memory.buffer, to, n);
-        slice.fill(0);
-        return n - slice.length;
-      },
+      arch_wasm_poll: () => 0,
+      copy_siginfo: () => 1,
     },
   };
 }
@@ -689,7 +435,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
       return;
     }
     if (data.type === "user_task_error") {
-      if (authorityHandlers) authorityHandlers.userTaskError(data.taskToken, data.reason, data.faultClass);
+      if (authorityHandlers) authorityHandlers.userTaskError(data.taskToken, data.reason, data.stack ?? "", data.faultClass);
       else postK5Diag("USER_TASK_ERROR_UNBOUND", false, { taskToken: data.taskToken, reason: data.reason });
       return;
     }
@@ -698,7 +444,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
   }
 
  const { fn, arg, memory, parent_user_module, parent_user_memory,
- parent_tls_base, brokerSab, workerId, mode, taskToken, forkPid } = data;
+ brokerSab, workerId, taskToken } = data;
 
  // K4 DIAG: outer synchronous exception boundary
  let currentStage: K4DiagStage = "INIT_RECEIVED";
@@ -782,17 +528,17 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
         state: "registered" | "running" | "parked" | "dead";
         /** Per-task user image (compile/instantiate target). */
         userModule: WebAssembly.Module | null;
+        /** Z1-G6-THREADS: start-stripped module for CLONE_VM children. */
+        userModuleNoinit: WebAssembly.Module | null;
         userMemory: WebAssembly.Memory | null;
         /** Guest entry recorded by switch_entry/fork_user for user.call. */
-        entryMode: "start" | "switch_entry" | "fork_user";
         guestFn: number;
         guestArg: number;
         forkPid: number;
         /** CLONE_VM/fork inheritance source (kernel task token). */
         inheritFrom: number;
-        /** Live pure user worker executing this task's guest code. */
-        userWorker: Worker | null;
-        userWorkerId: number;
+        /** Authority-assigned transport worker ID for retirement tracking. */
+        workerId: number;
         /** In-flight user.call suspension of this task's kernel stack. */
         pendingCall: {
           resolve: (outcome?: number) => void;
@@ -800,12 +546,25 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
         } | null;
         /** Z1-GABI: authoritative image identity derived from WASM_EXEC_COMMITTED. */
         imageId: bigint;
+        /** Z1-GABI: imageId the CURRENT user worker was spawned under. Differs
+         * from imageId between an exec commit and the next userCall spawn —
+         * worker messages from that window belong to the STALE image and must
+         * never resolve the pending user.call (contract v1.1 §5). */
+        activeImageId: bigint;
+        /** Raw kernel-owned argument snapshot (20+len bytes from argsPtr). */
+        argsBytes: Uint8Array | null;
+        /** Base address of the args snapshot in kernel linear memory. */
+        argsBaseAddr: number;
+        /** Parsed argument strings from the kernel snapshot. */
+        args: string[];
+        /** EntryPacket v1 describing how this task enters user code. */
+        entry: EntryPacket | null;
       }
       const tasks = new Map<number, TaskRecord>();
       /** taskToken → active yield suspension (kernel parked on this stack). */
       const suspensions = new Map<
         number,
-        { resolve: () => void; reject: (reason: unknown) => void; timer: TimerHandle | null }
+        { resolve: () => void; reject: (reason: unknown) => void; timer: TimerHandle | null; reason: number }
       >();
       let executingTask = 0;
       /** K5: C may issue a REAL opaque identity for a frame the host
@@ -814,11 +573,14 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
        * issued → canonical so ONE frame never starts twice. */
       const tokenAlias = new Map<number, number>();
       const canonicalToken = (token: number): number =>
-        tokenAlias.get(token) ?? token;
+        tokenAlias.get(token) ?? Number(token);
       /** Transport registry: authority-assigned workerId → kernel taskToken.
        * Broker requests are validated against THIS binding; body TASK_ID/TID
        * from callers are non-authoritative and never dispatched. */
       const workerIdToTask = new Map<number, number>();
+      /** Z1-GABI: kernel pid → taskToken, learned from C-stamped completions.
+       * Process events carry pids; task records are keyed by tokens. */
+      const pidToToken = new Map<number, number>();
       let nextUserWorkerId = 2; // 1 is the authority worker itself
       let nextDispatchId = 1;
 
@@ -1006,15 +768,19 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
             state: "registered",
             userModule: null,
             userMemory: null,
-            entryMode: "start",
+            userModuleNoinit: null,
             guestFn: 0,
             guestArg: 0,
             forkPid: 0,
             inheritFrom: 0,
-            userWorker: null,
-            userWorkerId: 0,
- pendingCall: null,
- imageId: 0n,
+            workerId: 0,
+            pendingCall: null,
+            imageId: 0n,
+            activeImageId: 0n,
+            argsBytes: null,
+            argsBaseAddr: 0,
+            args: [],
+            entry: null,
           };
           tasks.set(token, t);
         }
@@ -1034,25 +800,51 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
         if (t.state === "registered") startTask(t);
       };
 
-      /** IDLE deadline expiry → real timer interrupt delivery.
-       * TIMER_IRQ=2 (arch/wasm/include/asm/irq.h, KernelContext-frozen);
-       * raw logical irq value — the export ORs 1<<irq into per-cpu pending.
-       * cpu 0: K5 scope is cpus:1, single idle pinned on cpu0. No broadcast;
-       * per-cpu idle tokens deferred until cpus>1 is real. */
-      const KWA_TIMER_IRQ = 2;
-      const triggerTimerIrq = (): void => {
-        if (!instance) return;
-        const promisingIrq = wasmJspi.promising!(
-          instance.exports.trigger_irq_for_cpu as (
-            cpu: number,
-            irq: number,
-          ) => void,
-        );
-        promisingIrq(0, KWA_TIMER_IRQ).catch((error: unknown) => {
-          postK5Diag("TIMER_IRQ_FAILED", false, {
-            message: String(error instanceof Error ? error.message : error).slice(0, 200),
-          });
-        });
+      // T3: one real clockevent arm per CPU, independent of task/idle parks.
+      // Its IRQ export only sets pending bits; C runs handlers on a safe return.
+      const clockevents = new Map<
+        number,
+        { deadlineNs: bigint; timer: TimerHandle | null }
+      >();
+      const onTimerDeadline = (cpu: number, deadlineNs: bigint): void => {
+        assert(Number.isInteger(cpu) && cpu >= 0 && deadlineNs >= 0n,
+          "Invalid kernel clockevent arm");
+        const previous = clockevents.get(cpu);
+        if (previous?.timer !== null && previous?.timer !== undefined) {
+          clearTimeout(previous.timer);
+        }
+        clockevents.delete(cpu);
+        if (deadlineNs === 0n) return;
+        const arm = { deadlineNs, timer: null as TimerHandle | null };
+        clockevents.set(cpu, arm);
+        const expire = (): void => {
+          if (clockevents.get(cpu) !== arm) return;
+          const remaining = arm.deadlineNs - authorityNowNs();
+          if (remaining > 0n) {
+            arm.timer = setTimeout(expire,
+              Math.min(2_147_483_647, Math.ceil(Number(remaining) / 1_000_000)));
+            return;
+          }
+          clockevents.delete(cpu);
+          try {
+            assert(instance, "Clockevent expired before kernel instantiation");
+            const pendingIrq = instance.exports.trigger_irq_for_cpu as
+              (cpu: number, irq: number) => void;
+            pendingIrq(cpu, 2); // TIMER_IRQ, arch/wasm/include/asm/irq.h
+            postK5Diag("CLOCKEVENT_FIRED", true, {
+              cpu, deadlineNs: arm.deadlineNs.toString(),
+              lateNs: (-remaining).toString(), idleParked: idleSuspension !== null,
+            });
+            kickIdle("clockevent");
+          } catch (error: unknown) {
+            postK5Diag("TIMER_IRQ_FAILED", false, {
+              cpu, message: String(error instanceof Error ? error.message : error),
+            });
+          }
+        };
+        arm.timer = setTimeout(expire,
+          Math.min(2_147_483_647,
+            Math.max(0, Math.ceil(Number(deadlineNs - authorityNowNs()) / 1_000_000))));
       };
 
       const onKernelYield = (
@@ -1080,6 +872,7 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
             resolve,
             reject,
             timer: null as TimerHandle | null,
+            reason,
           };
           suspensions.set(selfTask, entry);
           const t = tasks.get(selfTask);
@@ -1087,8 +880,8 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           if (reason === YIELD_REASON_IDLE) {
             idleSuspension = { token: selfTask, entry };
           }
-          // C passes ABSOLUTE deadlines (process.c/irq.c/delay.c/fork.c).
-          if (deadlineNs > 0n) {
+          // Idle is woken by a pending IRQ, never by a second clockevent timer.
+          if (deadlineNs > 0n && reason !== YIELD_REASON_IDLE) {
             const delayMs = Math.max(
               0,
               Number(deadlineNs - authorityNowNs()) / 1_000_000,
@@ -1101,9 +894,6 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
               const curTask = tasks.get(selfTask);
               if (curTask) curTask.state = "running";
               executingTask = selfTask;
-              // IDLE deadline expiry is a REAL timer interrupt: deliver the
-              // timer IRQ before resolving the park (KernelContext contract).
-              if (reason === YIELD_REASON_IDLE) triggerTimerIrq();
               postK5Diag("YIELD_RESUME", true, {
                 taskToken: selfTask,
                 reason,
@@ -1130,6 +920,8 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
       const wakeAllSuspensions = (via: string): void => {
         for (const [token, s] of [...suspensions]) {
           if (suspensions.get(token) !== s) continue;
+          // A switched-out task resumes only when the kernel names it next.
+          if (s.reason === YIELD_REASON_SWITCH) continue;
           clearSuspensionTimer(s);
           suspensions.delete(token);
           const t = tasks.get(token);
@@ -1178,17 +970,19 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
         }
         if (t) {
           t.state = "dead";
-          // 2. Retire the pure user worker: its blocked broker wait can never
-          // complete — real retirement after kernel death, not a fake return.
-          if (t.userWorker) {
-            try {
-              t.userWorker.terminate();
-            } catch {
-              /* already gone */
-            }
-            t.userWorker = null;
+          // 2. Retire the pure user worker via main-side registry. The authority
+          // never holds Worker handles; main terminates after validating the
+          // authority-issued workerId + taskToken + imageId match the registry.
+          if (t.workerId !== 0) {
+            postMessage({
+              type: "retire_worker",
+              workerId: t.workerId,
+              taskToken: t.token,
+              imageId: t.activeImageId,
+            });
+            workerIdToTask.delete(t.workerId);
+            t.workerId = 0;
           }
-          if (t.userWorkerId !== 0) workerIdToTask.delete(t.userWorkerId);
           // 3. Unwind this task's parked kernel stack (user.call frame).
           if (t.pendingCall) {
             const pc = t.pendingCall;
@@ -1246,6 +1040,8 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
         Atomics.store(brokerI32, idx(pd.slot, S.KERNEL_PID), pid);
         Atomics.store(brokerI32, idx(pd.slot, S.KERNEL_TGID), tgid);
         Atomics.store(brokerU32, idx(pd.slot, S.KERNEL_GENERATION), generation);
+        // Z1-GABI: learn pid→token from C-stamped completion identity.
+        if (pid > 0) pidToToken.set(pid, taskToken);
         // Observed evidence: emitted ONLY from the real C completion stamp.
         postK5Diag("BROKER_SERVED", true, {
           taskToken,
@@ -1264,6 +1060,24 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
       };
 
       // ---- broker pump: registry-bound dispatch --------------------------
+      // Z1-F11-C4-D diag: last syscall numbers per task token (trap context).
+      const lastSyscalls = new Map<number, number[]>();
+      // Guest pointer → C string from a task's linear memory (diag only).
+      // Path pointers live in the SYSCALLING task's user memory, which for
+      // K5 tasks is a distinct WebAssembly.Memory from the kernel image —
+      // fall back to kernel memory only when the task has none.
+      const readGuestCString = (mem: WebAssembly.Memory | null, addr: number, max = 96): string => {
+        try {
+          const view = new Uint8Array((mem ?? memory).buffer);
+          if (!addr || addr >= view.length) return "";
+          let end = addr;
+          while (end < addr + max && end < view.length && view[end] !== 0) end++;
+          return new TextDecoder().decode(view.subarray(addr, end));
+        } catch {
+          return "";
+        }
+      };
+
       /** Transport-level rejection for requests with no live registry-bound
        * task: distinct from a fabricated Linux return; the syscall never ran. */
       const rejectStaleRequest = (slot: number): void => {
@@ -1345,12 +1159,42 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
                 nr,
               });
               dispatched = true;
+              // Z1-F11-C4-D diag: per-token syscall ring + openat path capture.
+              {
+                const ring = lastSyscalls.get(boundToken) ?? [];
+                ring.push(nr);
+                if (ring.length > 4) ring.shift();
+                lastSyscalls.set(boundToken, ring);
+              }
               postK5Diag("BROKER_DISPATCH", true, {
                 slot: s,
                 dispatchId,
                 taskToken: boundToken,
                 nr,
               });
+              if (nr === 56 /* openat */ || nr === 221 /* execve */) {
+                const umem = tasks.get(boundToken)?.userMemory ?? null;
+                const hexAt = (mem: WebAssembly.Memory | null, addr: number): string => {
+                  try {
+                    if (!mem || !addr) return "";
+                    const v = new Uint8Array(mem.buffer);
+                    if (addr >= v.length) return "oob";
+                    return Array.from(v.subarray(addr, Math.min(addr + 16, v.length)))
+                      .map((x) => x.toString(16).padStart(2, "0"))
+                      .join("");
+                  } catch {
+                    return "err";
+                  }
+                };
+                postK5Diag(nr === 56 ? "Z1_OPENAT_PATH" : "Z1_EXECVE_PATH", true, {
+                  taskToken: boundToken,
+                  dispatchId,
+                  args: `${a0},${a1},${a2}`,
+                  path: readGuestCString(umem, nr === 56 ? a1 : a0),
+                  userHex: hexAt(umem, nr === 56 ? a1 : a0),
+                  kernHex: hexAt(memory, nr === 56 ? a1 : a0),
+                });
+              }
               // Launched, not awaited: the bridge may park (parent waits while
               // the child runs) — multiple parked stacks, one executing at a
               // time, exactly the shared C ABI model. During execution C
@@ -1383,8 +1227,9 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
               }).catch((error: unknown) => {
                 const pd = pendingDispatch.get(dispatchId);
                 pendingDispatch.delete(dispatchId);
-                if (error === HALT_KERNEL || error === TERMINAL_TASK_EXIT) {
-                  return; // terminal cancellation owned by finishTask
+                if (error === HALT_KERNEL || error === TERMINAL_TASK_EXIT ||
+                    error === USER_IMAGE_REPLACED) {
+                  return; // retirement/cancellation belongs to the kernel transition
                 }
                 Atomics.add(brokerU32, OFF.BROKER_ERRORS, 1);
                 postK5Diag("BROKER_DISPATCH_FAILED", false, {
@@ -1418,25 +1263,24 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
 
       // ---- pure user worker spawn (production path via main) -------------
       const spawnUserWorker = (t: TaskRecord): void => {
-        if (!t.userModule || !t.userMemory) {
+        if (!t.userModule || !t.userMemory || !t.entry) {
           throw new Error(
-            `[K5] user.call before compile/instantiate for ${t.name}`,
+            `[K5] user.call before compile/instantiate/entry for ${t.name}`,
           );
         }
         const workerId = nextUserWorkerId++;
-        t.userWorkerId = workerId;
+        t.workerId = workerId;
         workerIdToTask.set(workerId, t.token);
         postK5Diag("USER_WORKER_SPAWNED", true, {
           taskToken: t.token,
           workerId,
           name: t.name,
-          mode: t.entryMode,
+          entryType: t.entry.type,
+          imageId: t.activeImageId.toString(16),
           forkPid: t.forkPid !== 0 ? t.forkPid : null,
           guestFn: t.guestFn,
           guestArg: t.guestArg,
           sharedMemory: true,
-          // Shared guest VAS: the generic Node adapter observes real guest
-          // result buffers (magic/pid words) directly through this object.
           userMemory: t.userMemory,
         });
         postMessage({
@@ -1448,9 +1292,13 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           user_memory: t.userMemory,
           taskToken: t.token,
           workerId,
-          mode: t.entryMode,
+          entry: t.entry,
           forkPid: t.forkPid !== 0 ? t.forkPid : undefined,
-        } as WorkerMessage);
+          argsBytes: t.argsBytes ?? undefined,
+          argsBaseAddr: t.argsBaseAddr,
+          args: t.args,
+          user_module_noinit: t.userModuleNoinit ?? undefined,
+        } satisfies WorkerMessage);
       };
 
       const handlers = {
@@ -1492,6 +1340,8 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           );
           promisingIrq(cpu, irq)
             .then(() => {
+              // Resume parked kernel frames to recheck real IRQ conditions.
+              // The resumed C scheduler still chooses the runnable task.
               wakeAllSuspensions(`irq:${irq}`);
             })
             .catch((error: unknown) => {
@@ -1509,13 +1359,33 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
             return;
           }
           virtioPending.delete(seq);
+          postK5Diag("Z1VIRTIO_RESULT", ok, { seq, ok, value });
           if (ok) pending.resolve(value);
           else pending.reject(new Error(`virtio op failed (seq=${seq})`));
         },
-        userTaskError(taskToken: number, reason: string, faultClass: "wasm_trap" | "returned_without_exit") {
+        userTaskError(taskToken: number, reason: string, stack: string, faultClass: "wasm_trap" | "returned_without_exit") {
           const t = tasks.get(taskToken);
           if (!t?.pendingCall) {
             postK5Diag("USER_TASK_ERROR_UNBOUND", false, { taskToken, reason, faultClass });
+            return;
+          }
+          // Z1-GABI §5 (v1.1): STALE IMAGE — a worker spawned under an older
+          // image must never resolve the CURRENT image's pending user.call.
+          // This is exactly the exec window: imageId already rebound, the new
+          // worker not yet spawned (or already running). Drop and count.
+          if (t.activeImageId !== t.imageId) {
+            postK5Diag("Z1_GABI_STALE_IMAGE_REJECT", false, {
+              taskToken,
+              activeImageId: t.activeImageId.toString(16),
+              currentImageId: t.imageId.toString(16),
+              reason: reason.slice(0, 120),
+            });
+            return;
+          }
+          // Z1-GABI §5 (v1.1): POST EXIT — a task that already died cannot
+          // have its (already rejected) pending frame resolved by a worker.
+          if (t.state === "dead") {
+            postK5Diag("Z1_GABI_POST_EXIT_REJECT", false, { taskToken, reason: reason.slice(0, 120) });
             return;
           }
           const pc = t.pendingCall;
@@ -1525,10 +1395,12 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           // resumes in kwa_enter_user_image. wasm_trap → user.call returns
           // KWA_USER_CALL_TRAP(1) → do_exit(SIGSEGV); returned_without_exit
           // → 0 → falls through to the do_exit(0) first-lifecycle path.
-          postK5Diag(faultClass === "wasm_trap" ? "CHILD_WASM_TRAP_CAUGHT" : "USER_IMAGE_RETURNED", true, {
-            taskToken,
-            reason: reason.slice(0, 120),
-          });
+                    postK5Diag(faultClass === "wasm_trap" ? "CHILD_WASM_TRAP_CAUGHT" : "USER_IMAGE_RETURNED", true, {
+                        taskToken,
+                        reason: reason.slice(0, 120),
+                        stack: String(stack ?? "").slice(0, 600),
+                        lastSyscalls: (lastSyscalls.get(taskToken) ?? []).join(","),
+                    });
           pc.resolve(faultClass === "wasm_trap" ? 1 : 0);
         },
       };
@@ -1549,6 +1421,23 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
 
       const userCall = (): Promise<number> => {
         const t = currentTask();
+        // Z1-GABI §5 (v1.1): authoritative user-image entry boundary.
+        // currentTask() resolves from executingTask — a live kernel-owned
+        // token. Any caller whose identity cannot be proven against the
+        // registry is rejected HERE, before the image is entered.
+        if (executingTask === 0 || t.token !== executingTask) {
+          postK5Diag("Z1_GABI_WRONG_USER_IMAGE_TASK", false, {
+            taskToken: t.token,
+            executingTask,
+          });
+          throw new Error(
+            `[Z1-GABI] user.call identity mismatch: token ${t.token} != executing ${executingTask}`,
+          );
+        }
+        if (t.state === "dead") {
+          postK5Diag("Z1_GABI_POST_EXIT_REJECT", false, { taskToken: t.token });
+          throw new Error(`[Z1-GABI] user.call after task death: ${t.name}`);
+        }
         if (!t.userModule || !t.userMemory) {
           throw new Error(
             `[K5] user.call before compile/instantiate for ${t.name}`,
@@ -1565,19 +1454,22 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           t.pendingCall = null;
           prev.reject(USER_IMAGE_REPLACED);
         }
-        if (t.userWorker) {
-          try {
-            t.userWorker.terminate();
-          } catch {
-            /* already gone */
-          }
-          t.userWorker = null;
-          if (t.userWorkerId !== 0) workerIdToTask.delete(t.userWorkerId);
-          t.userWorkerId = 0;
+        if (t.workerId !== 0) {
+          postMessage({
+            type: "retire_worker",
+            workerId: t.workerId,
+            taskToken: t.token,
+            imageId: t.activeImageId,
+          });
+          workerIdToTask.delete(t.workerId);
+          t.workerId = 0;
         }
         const promise = new Promise<number>((resolve, reject) => {
           t.pendingCall = { resolve: resolve as (outcome?: number) => void, reject };
         });
+        // Z1-GABI §5: this worker is spawned under the CURRENT image identity.
+        // Messages from any older worker (activeImageId != imageId) are stale.
+        t.activeImageId = t.imageId;
         spawnUserWorker(t);
         return promise;
       };
@@ -1589,6 +1481,15 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
         features?: bigint,
       ): Promise<number> => {
         const seq = nextVirtioSeq++;
+        // Z1-GABI boundary instrumentation: first missing transition of the
+        // block READ path (z1-gabi-virtio-boundary-analysis.json).
+        postK5Diag("Z1VIRTIO_CMD_POSTED", true, {
+          seq,
+          dev,
+          op,
+          args: JSON.stringify(args),
+          features: features?.toString(16) ?? null,
+        });
         return new Promise<number>((resolve, reject) => {
           virtioPending.set(seq, { resolve, reject });
           postMessage({ type: "virtio_cmd", seq, dev, op, args, features });
@@ -1628,10 +1529,11 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           is_worker: true,
           memory,
           onKernelYield,
+          onTimerDeadline,
           onFinishTask: finishTask,
           onSyscallComplete,
           onHaltWorker,
-          spawnWorkerRaw(fn, arg, name, shareUserMemory, taskToken, spawnFlags) {
+          spawnWorkerRaw(fn, arg, name, _shareUserMemory, taskToken, spawnFlags) {
             // Registration ONLY for normal tasks: continuations start when
             // the kernel names the token as nextTask — never on spawn.
             // token==0 is the boot task: registered now, started when
@@ -1651,18 +1553,22 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
               state: "registered",
               userModule: null,
               userMemory: null,
-              entryMode: "start",
+              userModuleNoinit: null,
               guestFn: 0,
               guestArg: 0,
               forkPid: 0,
               inheritFrom: executingTask,
-              userWorker: null,
-              userWorkerId: 0,
- pendingCall: null,
- // Z1-GABI: clone children share the parent image (CLONE_VM / clone-with-fn
- // semantics) and never emit their own WASM_EXEC_COMMITTED — inherit the
- // spawning task's identity. Boot/shell tasks keep 0n until their own exec.
- imageId: tasks.get(executingTask)?.imageId ?? 0n,
+              workerId: 0,
+              pendingCall: null,
+              // Z1-GABI: clone children share the parent image (CLONE_VM / clone-with-fn
+              // semantics) and never emit their own WASM_EXEC_COMMITTED — inherit the
+              // spawning task's identity. Boot/shell tasks keep 0n until their own exec.
+              imageId: tasks.get(executingTask)?.imageId ?? 0n,
+              activeImageId: tasks.get(executingTask)?.imageId ?? 0n,
+              argsBytes: tasks.get(executingTask)?.argsBytes ?? null,
+              argsBaseAddr: tasks.get(executingTask)?.argsBaseAddr ?? 0,
+              args: tasks.get(executingTask)?.args ?? [],
+              entry: null,
             });
             postK5Diag("TASK_REGISTERED", true, {
               taskToken,
@@ -1699,21 +1605,79 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
             if (typeof tableEntry !== "function") {
               throw new Error(`[K5A] run_on_main fn=${fn} not found`);
             }
-            const entryFn = tableEntry as (a: number) => unknown;
-            entryFn(arg);
+            // Z1-GABI: run the kernel function on a JSPI-CAPABLE stack.
+            // Direct entryFn(arg) runs on THIS handler's plain JS stack, where
+            // any Suspending import the kernel fn calls (virtio.setup/notify
+            // from virtio_wasm_probe -> _setup) throws
+            // SuspendError: trying to suspend JS frames — the probe then fails
+            // silently (driver core logs pr_debug) and root=/dev/vda never
+            // registers. promising() gives the call a suspendable stack; the
+            // returned promise settles when the fn returns (fire-and-forget:
+            // probe completion is the kernel's concern).
+            const promisingEntry = wasmJspi.promising!(
+              tableEntry as (a: number) => unknown,
+            );
+            const p = promisingEntry(arg) as Promise<unknown>;
+            p.catch((err: unknown) => {
+              postK5Diag("Z1_RUN_ON_MAIN_FAILED", false, {
+                fn,
+                error: String((err as Error)?.message ?? err).slice(0, 200),
+              });
+            });
           },
           get_user_module: () => currentTask().userModule,
           get_user_memory: () => currentTask().userMemory,
-          process_event_handler(event_kind, _run_id_hi, _run_id_lo, _event_seq, pid, _tgid, _ppid, _worker_id, data0, _data1, _comm) {
+          process_event_handler(event_kind, _run_id_hi, _run_id_lo, _event_seq, pid, _tgid, _ppid, _worker_id, data0, data1, _comm) {
             // Z1-GABI: derive authoritative image identity from WASM_EXEC_COMMITTED (kind 2).
+            // Events carry kernel pids; task records are keyed by tokens —
+            // resolve through the pidToToken map learned at completions.
             if (event_kind === 2 /* WASM_EXEC_COMMITTED */) {
-              const t = tasks.get(pid);
-              if (t) {
-                t.imageId = data0;
-                postK5Diag("Z1_GABI_IMAGE_BOUND", true, { taskToken: t.token, imageId: data0.toString(16) });
+              // Exec/exit syscalls NEVER reach syscall_complete, so
+              // pidToToken has no entry for a freshly exec'd task. The event
+              // is emitted synchronously on the exec bridge continuation —
+              // executingTask IS the exec'd task there.
+              const token = pidToToken.get(pid) ?? executingTask;
+              pidToToken.set(pid, token);
+              const t = tasks.get(token);
+              assert(t, "Exec committed for an unregistered task");
+              assert(data0 > 0n, "Exec committed without an image identity");
+              // Read the kernel-owned block before user entry, without re-entering C.
+              const argsPtr = Number(data1);
+              assert(Number.isSafeInteger(argsPtr) && argsPtr > 0 &&
+                argsPtr <= memory.buffer.byteLength - 20, "Invalid exec argument pointer");
+              const payloadLen = new DataView(memory.buffer).getInt32(argsPtr, true);
+              assert(payloadLen >= 0 && payloadLen < 262144 &&
+                argsPtr <= memory.buffer.byteLength - 20 - payloadLen,
+                "Invalid exec argument block");
+              const snapshot = new Uint8Array(memory.buffer, argsPtr, 20 + payloadLen).slice();
+              const view = new DataView(snapshot.buffer);
+              const argc = view.getInt32(8, true);
+              const table = view.getUint32(12, true) - argsPtr;
+              assert(argc > 0 && table >= 20 &&
+                table + (argc + 1) * 4 <= snapshot.length, "Invalid exec argument table");
+              const parsed: string[] = [];
+              const decoder = new TextDecoder();
+              for (let i = 0; i < argc; i++) {
+                const start = view.getUint32(table + i * 4, true) - argsPtr;
+                assert(start >= 20 && start < snapshot.length, "Invalid exec argument string");
+                const end = snapshot.indexOf(0, start);
+                assert(end !== -1, "Unterminated exec argument string");
+                parsed.push(decoder.decode(snapshot.subarray(start, end)));
               }
+              t.argsBytes = snapshot;
+              t.argsBaseAddr = argsPtr;
+              t.args = parsed;
+              t.imageId = data0;
+              t.entry = { version: 1, imageId: data0, type: "START_PROCESS" };
+              // activeImageId stays bound to the OLD Worker until userCall retires it.
+              postK5Diag("Z1_GABI_IMAGE_BOUND", true, {
+                taskToken: t.token, pid, imageId: data0.toString(16),
+              });
+              postK5Diag("Z1_F11_ARGV_CAPTURE", true, {
+                taskToken: t.token, pid, argc, bytes: snapshot.length, argv0: parsed[0]!,
+              });
             }
-            // NOTE: NO early return — the bridge falls through to the worker
+            // Fall through so observers receive every real kernel event.
             // forward path so main-thread event observers (witness rawEvents,
             // TASK_DEAD checks, monotonicity) keep receiving every event.
           },
@@ -1721,9 +1685,12 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
         user: {
           compile(buf: number, size: number): number {
             const t = currentTask();
-            const bytes = new Uint8Array(kernelMem.slice(buf, buf + size));
+            const bytes = kernelMem.slice(buf, buf + size);
             try {
-              t.userModule = new WebAssembly.Module(bytes);
+              const module = new WebAssembly.Module(bytes);
+              const continuation = compileContinuationImage(bytes);
+              t.userModule = module;
+              t.userModuleNoinit = continuation;
               return 0;
             } catch {
               return -8; // exec format error
@@ -1735,24 +1702,32 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
               throw new Error("[K5] user.instantiate before user.compile");
             }
             if (fresh_memory || !t.userMemory) {
-              // Fresh VAS: exec commits a new image; keep the long-standing
-              // 768MiB floor (blink heap) — guests declaring smaller minimums
-              // accept larger memories up to their 2GiB maximum.
+              // Z1-F11-C4-D: reduce initial memory for light guests to avoid
+              // renderer OOM at ~30s during multi-process exec chains.
+              // Keep 768MiB floor only for heavy guests (blink/node).
+              let isHeavy = false;
+              if (t.args.length > 0) {
+                const firstArg = t.args[0] ?? "";
+                isHeavy =
+                  firstArg.includes("/bin/blink") ||
+                  firstArg.includes("/bin/node");
+              }
+              const initial = isHeavy ? 12288 : 1024; // 768MiB vs 64MiB
+              const maximum = isHeavy ? 65536 : 32768; // 4 GiB for Blink, 2 GiB for native wasm (matches module limits)
               t.userMemory = new WebAssembly.Memory({
-                initial: 12288,
-                maximum: 32768,
+                initial,
+                maximum,
                 shared: true,
               });
               // A REAL exec never returns into the old image's entry context:
-              // reset to the fresh image's own entrypoint (mode start, table
-              // entry 0/_start). Inherited clone context (switch_entry fn,
-              // fork_user pid) applies ONLY to non-fresh clone-path image
-              // binding — fresh=false preserves it untouched. No guest
-              // special-casing, no table-length assumptions.
-              t.entryMode = "start";
+              // reset to the fresh image's own entrypoint (_start). Inherited
+              // clone context (switch_entry fn, fork_user pid) applies ONLY
+              // to non-fresh clone-path image binding — fresh=false preserves
+              // it untouched. No guest special-casing, no table-length assumptions.
               t.guestFn = 0;
               t.guestArg = 0;
               t.forkPid = 0;
+              t.entry = { version: 1, imageId: t.imageId, type: "START_PROCESS" };
             }
           },
           // The kernel parks INSIDE this import while the pure user worker
@@ -1768,10 +1743,21 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
             }
             // CLONE_VM: the child shares the parent's guest VAS.
             t.userModule = parent.userModule;
+            t.userModuleNoinit = parent.userModuleNoinit;
             t.userMemory = parent.userMemory;
-            t.entryMode = "switch_entry";
             t.guestFn = fn;
             t.guestArg = arg;
+            // Inherit raw args snapshot verbatim — never re-read guest memory.
+            t.argsBytes = parent.argsBytes;
+            t.argsBaseAddr = parent.argsBaseAddr;
+            t.args = parent.args;
+            t.entry = {
+              version: 1,
+              imageId: parent.activeImageId,
+              type: "SWITCH_FUNCTION_TABLE",
+              tableIndex: fn >>> 0,
+              arg: arg | 0,
+            };
           },
           fork_user(pid: number): void {
             const t = currentTask();
@@ -1786,19 +1772,35 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
             const parentPages = Math.ceil(
               parent.userMemory.buffer.byteLength / 65536,
             );
+            let isHeavy = false;
+            if (parent.args.length > 0) {
+              const firstArg = parent.args[0] ?? "";
+              isHeavy =
+                firstArg.includes("/bin/blink") ||
+                firstArg.includes("/bin/node");
+            }
             const fresh = new WebAssembly.Memory({
               initial: Math.max(parentPages, 1),
-              maximum: 32768,
+              maximum: isHeavy ? 65536 : 32768,
               shared: true,
             });
             new Uint8Array(fresh.buffer).set(
               new Uint8Array(parent.userMemory.buffer),
             );
             t.userModule = parent.userModule;
+            t.userModuleNoinit = parent.userModuleNoinit;
             t.userMemory = fresh;
-            t.entryMode = "fork_user";
             t.forkPid = pid;
-            // Guest entry recorded from the clone request that created us.
+            // Inherit raw args snapshot verbatim — fork children share argv.
+            t.argsBytes = parent.argsBytes;
+            t.argsBaseAddr = parent.argsBaseAddr;
+            t.args = parent.args;
+            t.entry = {
+              version: 1,
+              imageId: parent.activeImageId,
+              type: "RESUME_FORK_IMAGE",
+              forkPid: pid,
+            };
           },
           call_signal_handler(fn: number, sig: number): void {
             // Guest signal handlers execute only inside their user worker;
@@ -1812,15 +1814,26 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
           read(to: number, from: number, n: number): number {
             const t = currentTask();
             if (!t.userMemory) throw new Error("[K5] user.read before instantiate");
-            const slice = new Uint8Array(t.userMemory.buffer, from, n);
-            kernelMem.set(slice, to);
+            const source = from >>> 0;
+            const end = source + n;
+            if (end > t.userMemory.buffer.byteLength) {
+              t.userMemory.grow(Math.ceil((end - t.userMemory.buffer.byteLength) / 65536));
+            }
+            const slice = new Uint8Array(t.userMemory.buffer, source, n);
+            kernelMem.set(slice, to >>> 0);
             return n - slice.length;
           },
           write(to: number, from: number, n: number): number {
             const t = currentTask();
             if (!t.userMemory) throw new Error("[K5] user.write before instantiate");
-            const slice = kernelMem.subarray(from, from + n);
-            new Uint8Array(t.userMemory.buffer, to, n).set(slice);
+            const destination = to >>> 0;
+            const source = from >>> 0;
+            const end = destination + n;
+            if (end > t.userMemory.buffer.byteLength) {
+              t.userMemory.grow(Math.ceil((end - t.userMemory.buffer.byteLength) / 65536));
+            }
+            const slice = kernelMem.subarray(source, source + n);
+            new Uint8Array(t.userMemory.buffer, destination, n).set(slice);
             return n - slice.length;
           },
           write_zeroes(to: number, n: number): number {
@@ -1828,45 +1841,27 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
             if (!t.userMemory) {
               throw new Error("[K5] user.write_zeroes before instantiate");
             }
-            new Uint8Array(t.userMemory.buffer, to, n).fill(0);
+            new Uint8Array(t.userMemory.buffer, to >>> 0, n).fill(0);
             return 0;
           },
         },
         virtio: {
-          // Suspending round-trips to main: devices live in the main process;
-          // the kernel continuation parks until the device op completes.
-          set_features: new SuspendingCtor(
-            (dev: number, features: bigint) =>
-              virtioCall(dev, "set_features", [], features),
-          ) as WebAssembly.ImportValue,
-          setup: new SuspendingCtor(
-            (
-              dev: number,
-              irq: number,
-              is_config_addr: number,
-              is_vring_addr: number,
-              config_addr: number,
-              config_len: number,
-            ) =>
-              virtioCall(dev, "setup", [
-                irq,
-                is_config_addr,
-                is_vring_addr,
-                config_addr,
-                config_len,
-              ]),
-          ) as WebAssembly.ImportValue,
-          enable_vring: new SuspendingCtor(
-            (dev: number, vq: number, size: number, desc_addr: number) =>
-              virtioCall(dev, "enable_vring", [vq, size, desc_addr]),
-          ) as WebAssembly.ImportValue,
-          disable_vring: new SuspendingCtor(
-            (dev: number, vq: number) =>
-              virtioCall(dev, "disable_vring", [vq]),
-          ) as WebAssembly.ImportValue,
-          notify: new SuspendingCtor(
-            (dev: number, vq: number) => virtioCall(dev, "notify", [vq]),
-          ) as WebAssembly.ImportValue,
+          // Device setup and I/O retain their kernel stack until main completes the operation.
+          set_features: new SuspendingCtor((dev: number, features: bigint) =>
+            virtioCall(dev, "set_features", [], features)),
+          setup: new SuspendingCtor((
+            dev: number, irq: number, is_config_addr: number, is_vring_addr: number,
+            config_addr: number, config_len: number,
+          ) => virtioCall(dev, "setup", [
+            irq, is_config_addr, is_vring_addr, config_addr, config_len,
+          ])),
+          enable_vring: new SuspendingCtor((
+            dev: number, vq: number, size: number, desc_addr: number, dev_evt_addr: number,
+          ) => virtioCall(dev, "enable_vring", [vq, size, desc_addr, dev_evt_addr])),
+          disable_vring: new SuspendingCtor((dev: number, vq: number) =>
+            virtioCall(dev, "disable_vring", [vq])),
+          notify: new SuspendingCtor((dev: number, vq: number) =>
+            virtioCall(dev, "notify", [vq])),
         },
       } satisfies Imports;
 
@@ -1876,6 +1871,53 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
       currentStage = "BEFORE_ENTRYPOINT";
       instance = new WebAssembly.Instance(kernelModule, authorityImports);
       postK5Diag("KERNEL_INSTANTIATED", true, { instanceCount: 1 });
+
+      // Z1-F11-C3-A: dump the kernel lock-event ring buffer twice post-boot
+      // (before the runtime's 60s shell-prompt timeout closes the page).
+      // Pure-read exports (kwa_get_last_* precedent) — no kernel re-entry.
+      const z1DumpLockDiag = (tag: string) => {
+        try {
+          const kx = instance!.exports as unknown as {
+            z1_ldiag_ptr?: () => number;
+            z1_ldiag_count?: () => number;
+            z1_ldiag_words?: () => number;
+          };
+          if (!kx.z1_ldiag_ptr || !kx.z1_ldiag_count || !kx.z1_ldiag_words) {
+            postK5Diag("Z1_LDIAG_DUMP", false, { tag, reason: "missing exports" });
+            return;
+          }
+          const ptr = kx.z1_ldiag_ptr();
+          const count = kx.z1_ldiag_count();
+          const words = kx.z1_ldiag_words();
+          const dv = new DataView(memory.buffer);
+          const N = 96;
+          const start = 0; /* C3-A rev3: EARLY events (exit/exec) — the tail
+             fills with panic console output after init death. */
+          const end = Math.min(count, start + N);
+          const chunks: string[] = [];
+          for (let i = start; i < end; i++) {
+            const slot = i % 256;
+            const base = ptr + slot * words * 4;
+            let hex = "";
+            for (let w = 0; w < words; w++) {
+              const v = dv.getUint32(base + w * 4, true);
+              hex += v.toString(16).padStart(8, "0");
+            }
+            // copy bytes to a plain buffer for the hex encode (SAB-safe path
+            // is unnecessary here — toString on numbers only)
+            chunks.push(hex);
+          }
+          postK5Diag("Z1_LDIAG_DUMP", true, {
+            tag, count, ptr, words, first: start, chunks: chunks.join("."),
+          });
+        } catch (e) {
+          postK5Diag("Z1_LDIAG_DUMP", false, {
+            tag, error: String((e as Error)?.message ?? e).slice(0, 120),
+          });
+        }
+      };
+      setTimeout(() => z1DumpLockDiag("t40"), 40_000);
+      setTimeout(() => z1DumpLockDiag("t58"), 58_000);
 
       // K5 per-task syscall bridge — REQUIRED. The naked syscall export stays
       // untouched for standalone K1/K2/K4 witnesses, but the authority never
@@ -1951,149 +1993,74 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
  // For now we set up the user module imports with broker-routed syscall.
  currentStage = "BEFORE_USER_IMPORTS";
  postK4Diag("BEFORE_USER_IMPORTS");
- const user = user_imports({
- kernel_memory: memory,
- get_kernel_instance: () => {
- throw new Error("[K3] direct kernel instance access forbidden in secondary worker");
- },
- parent_user_module,
- parent_user_memory,
- parent_tls_base: parent_tls_base ?? 0,
- brokerSab,
- workerId,
- taskToken,
- });
- currentStage = "AFTER_USER_IMPORTS";
- postK4Diag("AFTER_USER_IMPORTS", { hasUserImports: !!user.imports, hasModule: !!user.module, hasMemory: !!user.memory });
-
- // K4 DIAG: Capture user module import contract
- currentStage = "MODULE_IMPORTS";
- const moduleImports = WebAssembly.Module.imports(parent_user_module);
- postK4Diag("MODULE_IMPORTS", {
- importCount: moduleImports.length,
- imports: moduleImports.map(i => ({ module: i.module, name: i.name, kind: i.kind })),
- });
-
- currentStage = "BEFORE_KERNEL_IMPORTS";
- postK4Diag("BEFORE_KERNEL_IMPORTS");
- const imports = {
- env: { memory },
- boot: {
- get_devicetree: unavailable,
- get_initramfs: unavailable,
- },
- user: user.imports,
- kernel: kernel_imports({
- is_worker: true,
- memory,
- spawn_worker(fn, arg, name, user_module, user_memory) {
- postMessage({
- type: "spawn_worker",
- fn,
- arg,
- name,
- user_module: user_module ?? user.module,
- user_memory: user_memory ?? user.memory,
- parent_tls_base: 0, // TLS not available without local kernel instance
- });
- },
- boot_console_write(message) {
- postMessage({ type: "boot_console_write", message });
- },
- boot_console_close() {
- postMessage({ type: "boot_console_close" });
- },
- run_on_main(fn, arg) {
- postMessage({ type: "run_on_main", fn, arg });
- },
- get_user_module() {
- return user.module;
- },
- get_user_memory() {
- return user.memory;
- },
- }),
- virtio: {
- set_features: unavailable,
- setup: unavailable,
- enable_vring: unavailable,
- disable_vring: unavailable,
- notify: unavailable,
- },
- } satisfies Imports;
- currentStage = "AFTER_KERNEL_IMPORTS";
- postK4Diag("AFTER_KERNEL_IMPORTS");
-
- // Z1-GABI NOTE: this is a LEGACY ROUTING COMPATIBILITY HEURISTIC for the
- // frozen KWA-v2 substrate. It is NOT a guest classification or authority
- // decision and MUST NOT be used for any Z1-GABI acceptance criterion.
- // KWA-v2.1 successor must replace this with explicit module/import
- // contract validation (instantiation-time fail-closed).
- const useLegacyMinimalImportRoute = moduleImports.length <= 2 &&
- moduleImports.every(i => i.module === "env" || i.module === "linux");
-
-  let userInstance: WebAssembly.Instance;
- if (useLegacyMinimalImportRoute) {
-    // Minimal user module path: bind parent module/memory into user_imports closure,
-    // then call doInstantiate() which builds broker-only imports correctly.
-    user.module = parent_user_module;
-    user.memory = parent_user_memory ?? memory;
-    user.doInstantiate();
-    assert(user.instance, "doInstantiate failed to set instance for minimal user module");
-    userInstance = user.instance;
-  } else {
-    // Kernel-shaped module path: use full imports object (existing behavior)
-    currentStage = "BEFORE_USER_INSTANTIATE";
-    postK4Diag("BEFORE_USER_INSTANTIATE", { importKeys: Object.keys(imports), userImportKeys: Object.keys(imports.user ?? {}) });
-    userInstance = new WebAssembly.Instance(parent_user_module, imports);
-  }
+ const userEntry = validateEntry(data.entry);
+ const imports = createGuestImports(data, userEntry);
+ const selectedModule = userEntry.type === "START_PROCESS"
+   ? parent_user_module : data.user_module_noinit;
+ assert(selectedModule, "Continuation missing its own no-start module");
+ for (const imp of WebAssembly.Module.imports(selectedModule)) {
+   const namespace = imports[imp.module];
+   const supported = namespace && Object.prototype.hasOwnProperty.call(namespace, imp.name) &&
+     ((imp.module === "env" && imp.name === "memory" && imp.kind === "memory") ||
+      (imp.module === "linux" && imp.kind === "function"));
+   assert(supported, `Unsupported user import ${imp.module}.${imp.name}`);
+ }
+ const userInstance = new WebAssembly.Instance(selectedModule, imports);
  currentStage = "AFTER_USER_INSTANTIATE";
  postK4Diag("AFTER_USER_INSTANTIATE", { exportNames: Object.keys(userInstance.exports) });
  try {
  currentStage = "BEFORE_ENTRYPOINT";
  const exportsRec = userInstance.exports as Record<string, unknown>;
- const table = exportsRec.__indirect_function_table;
- const resolveTableEntry = (): ((a: number) => unknown) | null => {
- if (!(table instanceof WebAssembly.Table)) return null;
- const entry = table.get(fn);
- return typeof entry === "function" ? (entry as (a: number) => unknown) : null;
- };
  try {
- if (mode === "fork_user") {
- // K5 fork child: ack the completed VAS snapshot BEFORE resuming, so the
- // parked parent's bounded fork-ack yield observes it in time.
- postMessage({ type: "fork_copied", pid: forkPid ?? 0, taskToken: taskToken ?? 0 });
- currentStage = "BEFORE_ENTRYPOINT_CALL";
- postK4Diag("BEFORE_ENTRYPOINT_CALL", { fn, arg, mode });
- const blinkResume = exportsRec.blink_user_fork_resume;
- if (typeof blinkResume === "function") {
- (blinkResume as () => number)();
- throw new Error("blink_user_fork_resume returned; fork child must exit via kernel");
- }
- const entry = resolveTableEntry();
- if (!entry) throw new Error(`[K5] fork_user entry fn=${fn} not found`);
- entry(arg);
- console.warn("fork child entrypoint returned without exiting");
- } else {
- const entry = resolveTableEntry();
- if (entry) {
- currentStage = "ENTRYPOINT_FOUND";
- postK4Diag("ENTRYPOINT_FOUND", { fn, entryType: "function" });
- currentStage = "BEFORE_ENTRYPOINT_CALL";
- postK4Diag("BEFORE_ENTRYPOINT_CALL", { fn, arg });
- entry(arg);
- } else {
- // K5: minimal WAT guests export _start(param i32); table may be absent.
- const startExport = exportsRec._start;
- if (typeof startExport !== "function") {
- throw new Error(`[K5] no entrypoint: fn=${fn}, no table entry, no _start export`);
- }
- currentStage = "BEFORE_ENTRYPOINT_CALL";
- postK4Diag("BEFORE_ENTRYPOINT_CALL", { fn: "_start", arg, via: "_start_export" });
- (startExport as (arg: number) => void)(0);
- }
- }
+   const entryPkt = userEntry;
+   if (entryPkt) {
+     switch (entryPkt.type) {
+       case "START_PROCESS": {
+         currentStage = "BEFORE_ENTRYPOINT_CALL";
+         postK4Diag("BEFORE_ENTRYPOINT_CALL", { via: "START_PROCESS" });
+         const startExport = exportsRec._start;
+         if (typeof startExport !== "function") {
+           throw new Error("[ENTRY] START_PROCESS: _start export missing");
+         }
+         (startExport as (arg: number) => void)(0);
+         break;
+       }
+       case "SWITCH_FUNCTION_TABLE": {
+         const table = exportsRec.__indirect_function_table;
+         if (!(table instanceof WebAssembly.Table)) {
+           throw new Error("[ENTRY] SWITCH_FUNCTION_TABLE: no function table");
+         }
+         if (entryPkt.tableIndex < 0 || entryPkt.tableIndex >= table.length) {
+           throw new Error(`[ENTRY] SWITCH_FUNCTION_TABLE index ${entryPkt.tableIndex} out of bounds (max ${table.length})`);
+         }
+         const f = table.get(entryPkt.tableIndex);
+         if (typeof f !== "function") {
+           throw new Error(`[ENTRY] SWITCH_FUNCTION_TABLE index ${entryPkt.tableIndex} is not a function`);
+         }
+         currentStage = "BEFORE_ENTRYPOINT_CALL";
+         postK4Diag("BEFORE_ENTRYPOINT_CALL", { via: "SWITCH_FUNCTION_TABLE", fn: entryPkt.tableIndex, arg: entryPkt.arg });
+         (f as (a: number) => void)(entryPkt.arg);
+         break;
+       }
+       case "RESUME_FORK_IMAGE": {
+         postMessage({ type: "fork_copied", pid: entryPkt.forkPid, taskToken: taskToken ?? 0 });
+         currentStage = "BEFORE_ENTRYPOINT_CALL";
+         postK4Diag("BEFORE_ENTRYPOINT_CALL", { via: "RESUME_FORK_IMAGE", forkPid: entryPkt.forkPid });
+         const blinkResume = exportsRec.blink_user_fork_resume;
+         if (typeof blinkResume === "function") {
+           (blinkResume as () => number)();
+           throw new Error("blink_user_fork_resume returned; fork child must exit via kernel");
+         }
+         throw new Error("Fork image does not export blink_user_fork_resume");
+       }
+     }
+  } else {
+    throw new Error("[ENTRY] missing entry packet: legacy mode dispatch is no longer supported");
+  }
     } catch (entryError) {
+      if (entryError === TERMINAL_TASK_EXIT) {
+        return;
+      }
       // K6R1: task-bound user workers report the real failure to the authority;
       // the kernel continuation resolves with it (never a fabricated result).
       // A genuine guest WebAssembly.RuntimeError is a classified wasm_trap:
@@ -2109,13 +2076,15 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
             type: "user_task_error",
             taskToken,
             reason: String((entryError as Error)?.message ?? entryError).slice(0, 300),
+            // Z1-F11-C3: wasm frames ("wasm-function[N]:0xoff") locate the
+            // exact blink function that trapped — the structural-fix target.
+            stack: String((entryError as Error)?.stack ?? "").slice(0, 800),
             faultClass: isGuestTrap ? "wasm_trap" : "returned_without_exit",
           });
           delivered = true;
         } catch { /* best-effort */ }
       }
       if (isGuestTrap && delivered) {
-        signalWorkerDone("guest_trap_delivered");
         return;
       }
       throw entryError;
@@ -2127,13 +2096,10 @@ self.onmessage = (event: MessageEvent<InitMessage | WorkerMessage>) => {
     postMessage({ type: "user_task_error", taskToken, reason: "entrypoint_returned_without_exit", faultClass: "returned_without_exit" });
  } catch { /* best-effort */ }
  }
- signalWorkerDone("entrypoint_returned");
  } catch (error) {
  if (error === HALT_KERNEL) {
- signalWorkerDone("halt_kernel");
  return;
  }
- signalWorkerDone("uncaught_" + ((error as Error)?.name ?? "error"));
  throw error;
  }
 

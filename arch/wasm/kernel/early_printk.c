@@ -10,6 +10,7 @@ static void early_console_write(struct console *con, const char *s,
 	wasm_kernel_boot_console_write(s, n);
 }
 
+
 static int early_console_exit(struct console *con)
 {
 	wasm_kernel_boot_console_close();

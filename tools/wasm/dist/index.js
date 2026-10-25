@@ -1,8 +1,9 @@
 import { generate_devicetree } from "./devicetree.js";
-import { assert, EventEmitter, unreachable } from "./util.js";
+import { assert, EventEmitter, unreachable, validateEntry } from "./util.js";
 import { virtio_imports, VirtioDevice } from "./virtio.js";
 import { decodeKernelProcessEvent, } from "./process-events.js";
 import { createBrokerSab } from "./kwa-broker.js";
+console.log("[R2-MODULE] index.js evaluated", import.meta.url);
 export { BlockDevice, ConsoleDevice, EntropyDevice, LoopbackNetworkBridge, NetworkDevice, VsockDevice, } from "./virtio.js";
 export { PROCESS_EVENT_KIND, decodeKernelProcessEvent, decodeLinuxWaitStatus, formatRunId, } from "./process-events.js";
 const resources = (async () => {
@@ -106,10 +107,8 @@ export class Machine extends EventEmitter {
     #d1_trace_enabled = false;
     #d1_run_id = "d1-run";
     #brokerSab;
-    /** Main-assigned transport ids only for legacy secondary spawns; authority
-     * ids live in 1..n (authority itself = 1, user workers from 2), so legacy
-     * ids start at 1M to keep the spaces disjoint. */
-    #nextWorkerId = 1_000_000;
+    /** Authority-keyed worker registry. Retirement requires matching identity. */
+    #workerRegistry = new Map();
     #process_event_handler;
     memory;
     devicetree;
@@ -198,7 +197,11 @@ export class Machine extends EventEmitter {
             });
         };
         const boot_console_close = () => {
-            this.#boot_console_writer.close();
+            // Z1-F11: do NOT close the writer. The kernel fires this when the
+            // CON_BOOT earlycon unregisters at the hvc0 handover, but the same
+            // channel carries post-handover diagnostics (z1_boot_diag) for the
+            // whole session. The reader loop in RealLinuxRuntime simply never
+            // sees done, which is harmless — #bootLog keeps accumulating.
         };
         let authorityWorker = null;
         // Main-side device binding: devices live here; the kernel (authority
@@ -206,10 +209,11 @@ export class Machine extends EventEmitter {
         // receives IRQs back through authority_irq.
         let vimports = null;
         const wireWorker = (worker) => {
-            worker.onmessage = (event) => {
+            worker.onmessage = async (event) => {
                 switch (event.data.type) {
                     case "spawn_worker":
-                        spawn_worker(event.data.fn, event.data.arg, event.data.name, event.data.user_module, event.data.user_memory, event.data.workerId, event.data.taskToken, event.data.mode, event.data.forkPid);
+                        assert(worker === authorityWorker, "User spawn requires kernel authority");
+                        spawn_worker(event.data.fn, event.data.arg, event.data.name, event.data.user_module, event.data.user_memory, event.data.workerId, event.data.taskToken, event.data.entry, event.data.forkPid, event.data.argsBytes, event.data.argsBaseAddr, event.data.args, event.data.user_module_noinit);
                         break;
                     case "boot_console_write":
                         boot_console_write(event.data.message);
@@ -238,7 +242,19 @@ export class Machine extends EventEmitter {
                             this.emit("d1_trace", decoded);
                         break;
                     }
+                    case "r1b_provenance":
+                        // R1-B: Surface ConsoleDevice constructor provenance from main thread.
+                        // Captures actual runtime class identity without hot-path console.log.
+                        this.emit("authority_diag", {
+                            type: "authority_diag",
+                            stage: "R1B_CONSOLE_PROVENANCE",
+                            ok: true,
+                            detail: event.data,
+                            ts: performance.now(),
+                        });
+                        break;
                     case "worker_done": {
+                        assert(worker === authorityWorker, "Only kernel authority may finish the VM");
                         const idx = this.#workers.indexOf(worker);
                         if (idx !== -1) {
                             this.#workers.splice(idx, 1);
@@ -246,6 +262,37 @@ export class Machine extends EventEmitter {
                         worker.onmessage = null;
                         worker.onerror = null;
                         worker.terminate();
+                        break;
+                    }
+                    case "retire_worker": {
+                        if (event.target !== authorityWorker) {
+                            console.error("[K5] retire_worker from non-authority worker ignored");
+                            break;
+                        }
+                        const { workerId, taskToken, imageId } = event.data;
+                        const reg = this.#workerRegistry.get(workerId);
+                        if (!reg) {
+                            console.warn(`[K5] retire_worker for unknown workerId=${workerId}`);
+                            break;
+                        }
+                        if (reg.taskToken !== taskToken || reg.imageId !== imageId) {
+                            console.warn(`[K5] retire_worker identity mismatch for workerId=${workerId}`);
+                            break;
+                        }
+                        const idx = this.#workers.indexOf(reg.worker);
+                        if (idx !== -1)
+                            this.#workers.splice(idx, 1);
+                        reg.worker.onmessage = null;
+                        reg.worker.onerror = null;
+                        reg.worker.terminate();
+                        this.#workerRegistry.delete(workerId);
+                        this.emit("authority_diag", {
+                            type: "authority_diag",
+                            stage: "WORKER_RETIRED",
+                            ok: true,
+                            detail: { workerId, taskToken, imageId: imageId.toString(16) },
+                            ts: performance.now(),
+                        });
                         break;
                     }
                     case "broker_kick": {
@@ -304,13 +351,13 @@ export class Machine extends EventEmitter {
                                 callVirtio.setup(dev, args[0], args[1], args[2], args[3], args[4]);
                             }
                             else if (op === "enable_vring") {
-                                callVirtio.enable_vring(dev, args[0], args[1], args[2]);
+                                callVirtio.enable_vring(dev, args[0], args[1], args[2], args[3]);
                             }
                             else if (op === "disable_vring") {
                                 callVirtio.disable_vring(dev, args[0]);
                             }
                             else {
-                                callVirtio.notify(dev, args[0]);
+                                await Promise.resolve(callVirtio.notify(dev, args[0]));
                             }
                             worker.postMessage({
                                 type: "virtio_result",
@@ -345,29 +392,35 @@ export class Machine extends EventEmitter {
                 this.emit("error", event);
             };
         };
-        const spawn_worker = (fn, arg, name, user_module, user_memory, workerId, taskToken, mode, forkPid) => {
-            console.log(`[SPW] fn=${fn} name=${name} umodule=${typeof user_module}:${String(user_module).slice(0, 40)} umem=${typeof user_memory}:${String(user_memory)} taskToken=${taskToken} mode=${mode}`);
+        const spawn_worker = (fn, arg, name, user_module, user_memory, workerId, taskToken, entry, forkPid, argsBytes, argsBaseAddr, args, user_module_noinit) => {
+            assert(Number.isInteger(workerId) && workerId > 1 && workerId <= 0x7fffffff, "Invalid authority-issued worker identity");
+            assert(Number.isInteger(taskToken) && taskToken > 0 && taskToken <= 0x7fffffff, "Invalid kernel task token");
+            assert(!this.#workerRegistry.has(workerId), "Duplicate user worker identity");
+            entry = validateEntry(entry);
+            assert(user_module && user_memory && Array.isArray(args), "User spawn requires task-bound image, memory and kernel arguments");
+            console.log(`[SPW] fn=${fn} name=${name} umodule=${typeof user_module}:${String(user_module).slice(0, 40)} umem=${typeof user_memory}:${String(user_memory)} taskToken=${taskToken} entry=${entry?.type ?? "none"}`);
             const worker = new Worker(new URL("./worker.js", import.meta.url), {
                 type: "module",
                 name,
             });
             this.#workers.push(worker);
+            this.#workerRegistry.set(workerId, { worker, taskToken, imageId: entry.imageId });
             wireWorker(worker);
             worker.postMessage({
                 fn,
                 arg,
-                // K3/K5A: secondary workers NEVER receive the kernel module;
-                // authority creation is exclusive to the Machine.boot path below.
                 memory: this.#memory,
                 parent_user_module: user_module,
                 parent_user_memory: user_memory,
-                // K4/K5: broker SAB + transport worker id for syscall routing.
-                // Authority-assigned ids are used verbatim (registry-bound).
                 brokerSab: this.#brokerSab,
-                workerId: workerId ?? this.#nextWorkerId++,
+                workerId,
                 taskToken,
-                mode,
+                entry,
                 forkPid,
+                argsBytes,
+                argsBaseAddr,
+                args,
+                user_module_noinit,
                 d1TraceEnabled: this.#d1_trace_enabled,
                 d1RunId: this.#d1_run_id,
             });
@@ -411,3 +464,4 @@ export class Machine extends EventEmitter {
         });
     }
 }
+//# sourceMappingURL=index.js.map

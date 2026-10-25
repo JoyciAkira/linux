@@ -19,6 +19,9 @@ void wasm_import(kernel, boot_console_close)(void);
 void *wasm_import(kernel, return_address)(int level);
 
 unsigned long long wasm_import(kernel, get_now_nsec)(void);
+/* T3: replace the CPU clockevent arm synchronously; zero cancels it.
+ * The host only marks a pending IRQ at expiry; C services it on its own stack. */
+void wasm_import(kernel, set_timer_deadline)(u32 cpu, u64 deadline_ns);
 
 void wasm_import(kernel, get_stacktrace)(char *buf, size_t size);
 
@@ -94,7 +97,7 @@ void wasm_import(virtio, setup)(u32 id, u32 irq, bool *is_config,
 				bool *is_vring, u8 *config, u32 config_len);
 
 void wasm_import(virtio, enable_vring)(u32 id, u32 index, u32 size,
-				       dma_addr_t desc);
+					  u32 desc_addr, u32 dev_evt_addr);
 void wasm_import(virtio, disable_vring)(u32 id, u32 index);
 
 void wasm_import(virtio, notify)(u32 id, u32 index);
