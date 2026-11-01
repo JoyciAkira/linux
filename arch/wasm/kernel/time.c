@@ -6,6 +6,8 @@
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
+#include <linux/math64.h>
+#include <linux/timekeeping.h>
 #include <asm/irq.h>
 #include <asm/wasm_imports.h>
 #include <asm/param.h>
@@ -48,6 +50,21 @@ unsigned long long sched_clock(void)
 	if (!origin)
 		origin = wasm_kernel_get_now_nsec();
 	return wasm_kernel_get_now_nsec() - origin;
+}
+
+/*
+ * S01 clock fix: the generic weak read_persistent_clock64 returns zero, so
+ * timekeeping_init seeds CLOCK_REALTIME at epoch0 (1970). The wasm host import
+ * wasm_kernel_get_now_nsec() is epoch-based host wall time (r2 adjudication:
+ * "Host epoch import is correct and used by sched_clock"), so expose it as
+ * the persistent clock. timekeeping_init pins REALTIME to host wall clock.
+ */
+void read_persistent_clock64(struct timespec64 *ts)
+{
+	u64 now = wasm_kernel_get_now_nsec();
+
+	ts->tv_nsec = do_div(now, NSEC_PER_SEC);
+	ts->tv_sec = (time64_t)now;
 }
 
 static u64 clock_read(struct clocksource *cs)
