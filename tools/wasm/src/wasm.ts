@@ -301,8 +301,9 @@ export function kernel_imports(
     onHaltWorker?: () => never;
   },
 ): Imports["kernel"] {
-  const mem = new Uint8Array(memory.buffer);
-
+// ponytail: fresh view per call — memory.grow() detaches the old ArrayBuffer,
+// so a captured Uint8Array becomes invalid after growth. Re-reading
+// memory.buffer on each access is the minimal correct fix; no caching.
   const Suspending = wasmJspi.Suspending;
   if (onKernelYield && typeof Suspending !== "function") {
     throw new Error(
@@ -332,6 +333,7 @@ export function kernel_imports(
     },
 
     boot_console_write: (msg, len) => {
+      const mem = new Uint8Array(memory.buffer);
       boot_console_write(mem.slice(msg, msg + len).buffer);
     },
     boot_console_close,
@@ -366,10 +368,11 @@ export function kernel_imports(
         trace[size - 2] = 46;
         trace[size - 3] = 46;
       }
-      mem.set(trace.slice(0, size), buf);
+      new Uint8Array(memory.buffer).set(trace.slice(0, size), buf);
     },
 
     spawn_worker: (fn: number, arg: number, comm: number, comm_len: number, share_user_memory: number, taskToken: number, spawn_flags: number) => {
+      const mem = new Uint8Array(memory.buffer);
       const name = new TextDecoder().decode(
         mem.slice(comm, comm + comm_len),
       );
@@ -433,6 +436,7 @@ export function kernel_imports(
       comm,
       comm_len,
     ) => {
+      const mem = new Uint8Array(memory.buffer);
       const comm_str = new TextDecoder().decode(
         mem.slice(comm, comm + comm_len),
       );
