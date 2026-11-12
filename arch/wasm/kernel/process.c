@@ -167,7 +167,32 @@ kwa_task_entry(u32 task_token)
 	int cpu;
 
 	slot = kwa_task_take(task_token);
-	BUG_ON(!slot); // host must never start an unregistered/started task
+	if (!slot) {
+		/* Z2-FIX: the cooperative handoff can race a blink-group exit
+		 * cascade — a dying sibling's pick may name a token whose task
+		 * already completed do_task_dead (its slot was retired and the
+		 * token cleared), so kwa_task_take() legitimately returns NULL.
+		 * There is nothing left to run for that successor: resolve this
+		 * continuation as a clean no-op instead of trapping the machine.
+		 *
+		 * A genuine double-start of a LIVE task remains fatal: if the
+		 * slot still exists, is already started, and the task has no
+		 * exit_state, the scheduler named a live task twice — keep the
+		 * loud BUG for that real invariant violation. */
+		struct kwa_task_slot *stale = kwa_task_lookup(task_token);
+		struct task_struct *stale_task = stale ? stale->task : NULL;
+
+		if (stale && stale_task &&
+		    READ_ONCE(stale_task->exit_state) == 0 &&
+		    (stale->flags & KWA_SF_STARTED)) {
+			pr_err("kwa_task_entry: double-start of live task token=%u pid=%d\n",
+			       task_token, stale_task->pid);
+			BUG();
+		}
+		pr_info_ratelimited("kwa_task_entry: successor token=%u already finished; no-op\n",
+				    task_token);
+		return;
+	}
 
 	if (task_token == 0) {
 		/* Boot: the known pristine root stack, outside any foreign
