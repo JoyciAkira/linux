@@ -6,6 +6,7 @@
 #include <asm/wasm_imports.h>
 #include <linux/cache.h>
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/screen_info.h>
 
 unsigned long init_stack[THREAD_SIZE / sizeof(unsigned long)] = { 0 };
