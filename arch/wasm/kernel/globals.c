@@ -232,6 +232,78 @@ void kwa_task_retire(u32 token)
 	}
 }
 
+/* ---- R11: layout published to the host ----------------------------------
+ * The host must never hard-code kernel addresses or struct offsets: a rebuild
+ * moves them silently. Everything the host is allowed to read from kernel
+ * memory is described here. The host reads the table through the pure-read
+ * export kwa_host_layout_ptr() and refuses to start unless magic, version,
+ * word count and fingerprint all check out.
+ * Wire format: KWA_HOST_LAYOUT_WORDS little-endian u32; the last word is the
+ * FNV-1a (32 bit) of the bytes of all preceding words. Append-only: new
+ * fields go before the fingerprint and bump KWA_HOST_LAYOUT_VERSION. */
+#define KWA_HOST_LAYOUT_MAGIC 0x314c574bu /* bytes "KWL1" */
+#define KWA_HOST_LAYOUT_VERSION 1u
+
+struct kwa_host_layout {
+	u32 magic;
+	u32 version;
+	u32 words;
+	u32 task_slots_addr;
+	u32 task_slot_count;
+	u32 task_slot_size;
+	u32 slot_off_token;
+	u32 slot_off_task;
+	u32 slot_off_fn;
+	u32 slot_off_fn_arg;
+	u32 slot_off_flags;
+	u32 slot_flag_started;
+	u32 slot_flag_autostart;
+	u32 task_off_flags;
+	u32 task_off_exit_state;
+	u32 task_off_pid;
+	u32 task_off_tgid;
+	u32 task_pf_exiting;
+	u32 fingerprint;
+};
+#define KWA_HOST_LAYOUT_WORDS (sizeof(struct kwa_host_layout) / sizeof(u32))
+
+static struct kwa_host_layout kwa_host_layout;
+
+/* Pure read after the first call: no locks, no scheduling, no kernel state.
+ * Safe before boot() (only link-time constants and offsetof). */
+__attribute__((export_name("kwa_host_layout_ptr"))) u32 kwa_host_layout_ptr(void)
+{
+	struct kwa_host_layout *l = &kwa_host_layout;
+	const u8 *p = (const u8 *)l;
+	u32 h = 2166136261u;
+	size_t i;
+
+	l->magic = KWA_HOST_LAYOUT_MAGIC;
+	l->version = KWA_HOST_LAYOUT_VERSION;
+	l->words = KWA_HOST_LAYOUT_WORDS;
+	l->task_slots_addr = (u32)(uintptr_t)kwa_task_slots;
+	l->task_slot_count = KWA_TASK_SLOTS;
+	l->task_slot_size = sizeof(struct kwa_task_slot);
+	l->slot_off_token = offsetof(struct kwa_task_slot, token);
+	l->slot_off_task = offsetof(struct kwa_task_slot, task);
+	l->slot_off_fn = offsetof(struct kwa_task_slot, fn);
+	l->slot_off_fn_arg = offsetof(struct kwa_task_slot, fn_arg);
+	l->slot_off_flags = offsetof(struct kwa_task_slot, flags);
+	l->slot_flag_started = KWA_SF_STARTED;
+	l->slot_flag_autostart = KWA_SF_AUTOSTART;
+	l->task_off_flags = offsetof(struct task_struct, flags);
+	l->task_off_exit_state = offsetof(struct task_struct, exit_state);
+	l->task_off_pid = offsetof(struct task_struct, pid);
+	l->task_off_tgid = offsetof(struct task_struct, tgid);
+	l->task_pf_exiting = PF_EXITING;
+	for (i = 0; i < sizeof(*l) - sizeof(u32); i++) {
+		h ^= p[i];
+		h *= 16777619u;
+	}
+	l->fingerprint = h;
+	return (u32)(uintptr_t)l;
+}
+
 struct task_struct *kwa_task_validate_running(u32 token, int *cpu_out)
 {
 	struct kwa_task_slot *slot;
