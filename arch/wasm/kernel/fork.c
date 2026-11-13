@@ -1,3 +1,4 @@
+#include <linux/sched/signal.h>
 #include <asm/globals.h>
 #include <asm/param.h>
 #include <asm/process_events.h>
@@ -11,8 +12,7 @@
  * real __switch_to with context suspend/resume events); the host calls the
  * fork_copied export — via promising, on its own continuation — once the
  * child VAS snapshot is complete, which stores the pid and wakes the waiter. */
-static int g_ufr_copy_pid;
-static struct task_struct *g_ufr_waiter;
+/* Each cloning task waits for its own child snapshot. */
 
 struct clone_fn {
 	void *__user fn;
@@ -87,20 +87,29 @@ SYSCALL_DEFINE6(clone, void *__user, fn, void *__user, fn_arg, unsigned long,
 		 * fork-point state. Bounded: the host must answer via
 		 * fork_copied; a missed wake cannot hang the kernel. */
 		if (child > 0) {
-			g_ufr_waiter = current;
+			long remaining = 5 * HZ;
+			bool copied = false;
+			WRITE_ONCE(current_thread_info()->k5_fork_copied_pid, 0);
 			for (;;) {
 				set_current_state(TASK_UNINTERRUPTIBLE);
-				if (READ_ONCE(g_ufr_copy_pid) == child)
-					break;
-				if (!schedule_timeout(HZ / 10)) {
-					pr_err("K5: fork copy-ack timeout waiting for child %d\n",
-					       child);
+				if (READ_ONCE(current_thread_info()->k5_fork_copied_pid) == child) {
+					copied = true;
 					break;
 				}
+				if (!remaining)
+					break;
+				remaining = schedule_timeout(remaining);
 			}
 			__set_current_state(TASK_RUNNING);
-			g_ufr_waiter = NULL;
-			g_ufr_copy_pid = 0;
+			WRITE_ONCE(current_thread_info()->k5_fork_copied_pid, 0);
+			if (!copied) {
+				struct pid *pid = find_get_pid(child);
+				if (pid) {
+					kill_pid(pid, SIGKILL, 1);
+					put_pid(pid);
+				}
+				return -ETIMEDOUT;
+			}
 			wasm_emit_clone_committed(child, clone_flags);
 		}
 		return child;
@@ -130,7 +139,13 @@ SYSCALL_DEFINE6(clone, void *__user, fn, void *__user, fn_arg, unsigned long,
 __attribute__((export_name("fork_copied")))
 void fork_copied(unsigned int pid)
 {
-	g_ufr_copy_pid = (int)pid;
-	if (g_ufr_waiter)
-		wake_up_process(g_ufr_waiter);
+	struct task_struct *child;
+	rcu_read_lock();
+	child = find_task_by_vpid(pid);
+	if (child) {
+		struct task_struct *parent = rcu_dereference(child->real_parent);
+		WRITE_ONCE(task_thread_info(parent)->k5_fork_copied_pid, (int)pid);
+		wake_up_process(parent);
+	}
+	rcu_read_unlock();
 }

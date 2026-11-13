@@ -35,6 +35,7 @@ struct thread_info {
 	unsigned long k5_park_floor;
 	u32 k5_flags;
 	int k5_reaped_child;
+	int k5_fork_copied_pid;
 };
 
 /* K5 flags */
@@ -51,7 +52,8 @@ struct thread_info {
 		.args = NULL,                        \
 		.k5_park_floor = 0,                  \
 		.k5_flags = 0,                       \
-		.k5_reaped_child = 0,                \
+		.k5_reaped_child = 0,                       \
+		.k5_fork_copied_pid = 0,                \
 	}
 
 #define TIF_SYSCALL_TRACE 0 /* syscall trace active */
