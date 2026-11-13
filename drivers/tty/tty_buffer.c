@@ -609,12 +609,7 @@ void tty_flip_buffer_push(struct tty_port *port)
 
 	tty_flip_buffer_commit(buf->tail);
 	pr_info("Z1P\n");
-	/* Z1-F12-R4: the wasm port never initializes the workqueue
-	 * subsystem (system_unbound_wq stays NULL), so queue_work() is a
-	 * no-op and RX input would die in the flip buffer. Run the ldisc
-	 * flush synchronously — same tradeoff virtio_wasm.c makes for
-	 * its device setup ("Synchronous setup guarantees..."). */
-	flush_to_ldisc(&buf->work);
+	queue_work(system_unbound_wq, &buf->work);
 }
 EXPORT_SYMBOL(tty_flip_buffer_push);
 

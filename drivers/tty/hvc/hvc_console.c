@@ -789,11 +789,6 @@ static int __hvc_poll(struct hvc_struct *hp, bool may_sleep)
 		   a minimum for performance. */
 		timeout = MIN_TIMEOUT;
 
-		/* Z1-F12-R4c: queue_work/flush_work are no-ops in the wasm port
-		   (workqueues never initialized, system_unbound_wq == NULL,
-		   queue_work never sets WORK_PENDING). tty_flip_buffer_push()
-		   now runs flush_to_ldisc() synchronously (see tty_buffer.c),
-		   delivering RX bytes to the ldisc inline. */
 		tty_flip_buffer_push(&hp->port);
 	}
 	tty_kref_put(tty);
