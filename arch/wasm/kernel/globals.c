@@ -304,6 +304,71 @@ __attribute__((export_name("kwa_host_layout_ptr"))) u32 kwa_host_layout_ptr(void
 	return (u32)(uintptr_t)l;
 }
 
+/* ---- Task state snapshot for the host (diagnostic, pure read) -----------
+ * Equivalent of SysRq-T for a host that cannot inject keys: when a guest
+ * stalls, the host needs to know which tasks exist and whether each one is
+ * runnable or sleeping. The host calls this export from its own event loop,
+ * i.e. while no kernel code is on the stack, so the task list is quiescent;
+ * no lock is taken and nothing is printed (the console may be the thing that
+ * is stuck). Self-describing wire format, little-endian u32 words:
+ *   header: magic "KWS1", version, entry_bytes, count, total_tasks
+ *   entry : token, pid, tgid, state, exit_state, flags, on_rq, reserved, comm[16]
+ * token is the value the host knows the task by (kwa_task_token). */
+#define KWA_SNAP_MAGIC 0x3153574bu /* bytes "KWS1" */
+#define KWA_SNAP_VERSION 1u
+#define KWA_SNAP_MAX 128
+
+struct kwa_task_snap_entry {
+	u32 token;
+	u32 pid;
+	u32 tgid;
+	u32 state;
+	u32 exit_state;
+	u32 flags;
+	u32 on_rq;
+	u32 reserved;
+	char comm[TASK_COMM_LEN];
+};
+
+static struct {
+	u32 magic;
+	u32 version;
+	u32 entry_bytes;
+	u32 count;
+	u32 total;
+	struct kwa_task_snap_entry entries[KWA_SNAP_MAX];
+} kwa_task_snap;
+
+__attribute__((export_name("kwa_task_snapshot_ptr"))) u32 kwa_task_snapshot_ptr(void)
+{
+	struct task_struct *g, *t;
+	u32 n = 0, total = 0;
+
+	kwa_task_snap.magic = KWA_SNAP_MAGIC;
+	kwa_task_snap.version = KWA_SNAP_VERSION;
+	kwa_task_snap.entry_bytes = sizeof(struct kwa_task_snap_entry);
+	for_each_process_thread(g, t) {
+		struct kwa_task_snap_entry *e;
+
+		total++;
+		if (n >= KWA_SNAP_MAX)
+			continue;
+		e = &kwa_task_snap.entries[n++];
+		e->token = kwa_task_token(t);
+		e->pid = t->pid;
+		e->tgid = t->tgid;
+		e->state = READ_ONCE(t->__state);
+		e->exit_state = READ_ONCE(t->exit_state);
+		e->flags = t->flags;
+		e->on_rq = t->on_rq;
+		e->reserved = 0;
+		memcpy(e->comm, t->comm, TASK_COMM_LEN);
+	}
+	kwa_task_snap.count = n;
+	kwa_task_snap.total = total;
+	return (u32)(uintptr_t)&kwa_task_snap;
+}
+
 struct task_struct *kwa_task_validate_running(u32 token, int *cpu_out)
 {
 	struct kwa_task_slot *slot;
